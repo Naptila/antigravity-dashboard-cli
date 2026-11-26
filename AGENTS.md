@@ -38,7 +38,7 @@ The codebase separates I/O & parsing, calendar/window aggregation, and UI render
 ~/.gemini/antigravity-cli/dashboard-cli-data/usage-v1.json
         │
         ▼  Layer 2: Timezone Math, Rolling Date-Window & Cost Aggregation (src/usage-aggregator.mjs + src/pricing.mjs)
-Normalized UsageReport DTO (overview, periods, models, heatmap, cliReportedCost)
+Normalized UsageReport DTO (overview, periods, models, heatmap)
         │
         ▼  Layer 3: Pure Presentation & Width-Aware Rendering (src/stats-render.mjs / --json / --markdown)
 Terminal ANSI Table + 12-Week Heatmap  |  Markdown Report  |  JSON Output
@@ -46,7 +46,7 @@ Terminal ANSI Table + 12-Week Heatmap  |  Markdown Report  |  JSON Output
 
 ### Layer 1: Token Log Reading & Incremental Ledger (`src/transcript-reader.mjs`)
 - **Discovery (`discoverTranscriptFiles`)**: Scans `<brainDir>/<convId>/.system_generated/logs/transcript.jsonl` once per sync and hashes `<convId>` with SHA-256 (`hashKey`, 20 hex chars) so raw conversation IDs are not duplicated across every record.
-- **Incremental Cursors**: Tracks `{ byteOffset, size, mtimeMs, lastStepIndex, cliCostUsd, cliSubagentUsd }` per conversation in `ledger.files[convHash]`. Unchanged files (`size` and `mtimeMs` identical) require zero file opens or reads.
+- **Incremental Cursors**: Tracks `{ byteOffset, size, mtimeMs, lastStepIndex }` per conversation in `ledger.files[convHash]`. Unchanged files (`size` and `mtimeMs` identical) require zero file opens or reads.
 - **Chunked Streaming Parser (`scanSingleTranscriptIntoLedger`)**:
   - Streams unread tail bytes in 4 MiB chunks using `Buffer` slicing up to the last `0x0a` (`\n`) so multi-byte UTF-8 sequences split across chunk boundaries are never corrupted.
   - Handles trailing lines without a final `\n`: complete JSON objects at EOF are parsed and committed; incomplete partial writes leave `byteOffset` at the last newline so the next sync re-reads the completed line.

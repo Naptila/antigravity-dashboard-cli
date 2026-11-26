@@ -8,10 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { estimateTokenCost, loadCustomPricing } from '../src/pricing.mjs';
 import {
   buildUsageReport,
-  recordObservedCliCost,
   syncUsageLedger,
 } from '../src/usage-ledger.mjs';
-import { renderUsageReport } from '../src/stats-render.mjs';
+import { renderUsageReport, renderUsageReportMarkdown } from '../src/stats-render.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -104,8 +103,6 @@ test('syncUsageLedger scans multi-day transcripts incrementally, preserves delet
       }) + '\n'
     );
 
-    recordObservedCliCost(dataDir, 'conv-1', { totalUsd: 0.42, subagentUsd: 0.05 });
-
     const firstSync = syncUsageLedger({ dataDir, brainDir });
     assert.equal(firstSync.scannedConversations, 2);
     assert.equal(firstSync.ledger.records.length, 3);
@@ -129,7 +126,7 @@ test('syncUsageLedger scans multi-day transcripts incrementally, preserves delet
     assert.equal(reportUtc8.periods[0].requests, 1);
     assert.equal(reportUtc8.periods[1].period, '2026-11-19');
     assert.equal(reportUtc8.periods[1].requests, 2);
-    assert.equal(reportUtc8.cliReportedCost.totalUsd, 0.42);
+    assert.equal('cliReportedCost' in reportUtc8, false);
     assert.equal(reportUtc8.models.length, 2);
     assert.equal(reportUtc8.models[0].model, 'gemini-4-neon-high');
     assert.ok(reportUtc8.overview.allTime.estimatedUsd > 0);
@@ -178,7 +175,64 @@ test('bin/cli.mjs lang defaults to en and toggles live', () => {
       encoding: 'utf8',
     });
     assert.match(toggled, /Language switched to: en/);
+
+    // preview supports --show-cost override without mutating preferences.json
+    const prevDefault = execFileSync(
+      process.execPath,
+      [cli, 'preview', '--no-color', '--data-dir', tmpData],
+      { encoding: 'utf8' }
+    ).trim();
+    assert.doesNotMatch(prevDefault, /\|\s*\$0\.18$/);
+
+    const prevWithCost = execFileSync(
+      process.execPath,
+      [cli, 'preview', '--show-cost', 'true', '--no-color', '--data-dir', tmpData],
+      { encoding: 'utf8' }
+    ).trim();
+    assert.match(prevWithCost, /\|\s*\$0\.18$/);
+
+    // Unsupported per-subcommand flags fail fast instead of silently no-oping
+    assert.throws(
+      () =>
+        execFileSync(process.execPath, [cli, 'stats', '--show-cost', 'false', '--data-dir', tmpData], {
+          encoding: 'utf8',
+          stdio: 'pipe',
+        }),
+      /Option --show-cost is not supported by "stats"/
+    );
+    assert.throws(
+      () =>
+        execFileSync(process.execPath, [cli, 'install', '--show-cost', 'true'], {
+          encoding: 'utf8',
+          stdio: 'pipe',
+        }),
+      /Option --show-cost is not supported by "install"/
+    );
   } finally {
     fs.rmSync(tmpData, { recursive: true, force: true });
   }
+});
+
+test('stats renders -- instead of $0.00 when models have no matching pricing rule (pricedRequests === 0)', () => {
+  const unpricedReport = buildUsageReport(
+    {
+      schema: 1,
+      models: ['custom-unpriced-model'],
+      files: {},
+      records: [
+        [Math.floor(Date.parse('2026-11-26T08:00:00Z') / 1000), 'conv1', 1, 0, 5000, 15000, 0, 1000],
+      ],
+    },
+    { tz: 'utc', now: Date.parse('2026-11-26T10:00:00Z') }
+  );
+  assert.equal(unpricedReport.overview.allTime.pricedRequests, 0);
+  assert.equal(unpricedReport.models[0].pricedRequests, 0);
+
+  const ansiPlain = renderUsageReport(unpricedReport, { language: 'en', width: 110, color: false });
+  assert.doesNotMatch(ansiPlain, /\$0\.00/);
+  assert.match(ansiPlain, /custom-unpriced-model\s+1\s+21K\s+100%\s+15K\s+75%\s+--\s+--/);
+
+  const md = renderUsageReportMarkdown(unpricedReport, { language: 'en' });
+  assert.doesNotMatch(md, /\$0\.00/);
+  assert.match(md, /\| `custom-unpriced-model` \| 1 \| \*\*21K\*\* \| 100% \| 15K \| 75% \| \*\*--\*\* \| -- \|/);
 });

@@ -53,9 +53,68 @@ Commands:
              Options: --language en|zh-CN|zh-TW
                       --show-cache true|false  --show-cost true|false
   preview    Preview minimalist statusLine with synthetic data
-             Options: --argon  --no-stack  --language ...  --width N  --no-color  --json
+             Options: --argon  --no-stack  --show-cache true|false  --show-cost true|false
+                      --language ...  --width N  --no-color  --json
   help       Show this help
 `;
+
+/** @type {Record<string, ReadonlySet<string>>} */
+const COMMAND_ALLOWED_FLAGS = {
+  stats: new Set([
+    'days',
+    'from',
+    'to',
+    'by',
+    'model',
+    'tz',
+    'rebuild',
+    'language',
+    'width',
+    'no-color',
+    'markdown',
+    'json',
+    'data-dir',
+    'brain-dir',
+    'home',
+  ]),
+  lang: new Set(['language', 'data-dir', 'home']),
+  preview: new Set([
+    'argon',
+    'no-stack',
+    'language',
+    'width',
+    'no-color',
+    'json',
+    'show-cache',
+    'show-cost',
+    'data-dir',
+    'home',
+  ]),
+  install: new Set(['no-stack', 'language', 'no-color', 'node', 'home', 'data-dir']),
+  uninstall: new Set(['home']),
+  status: new Set(['home', 'data-dir']),
+  config: new Set(['language', 'show-cache', 'show-cost', 'data-dir', 'home']),
+};
+
+/**
+ * Validates that parsed flags and positional arguments are supported by `canonicalCmd`.
+ * @param {string} displayCmd
+ * @param {string} canonicalCmd
+ * @param {Record<string, any>} flags
+ * @param {string[]} positional
+ * @param {number} [maxPositional=0]
+ */
+function assertCommandArgs(displayCmd, canonicalCmd, flags, positional, maxPositional = 0) {
+  const allowed = COMMAND_ALLOWED_FLAGS[canonicalCmd];
+  for (const key of Object.keys(flags)) {
+    if (!allowed || !allowed.has(key)) {
+      throw new Error(`Option --${key} is not supported by "${displayCmd}".`);
+    }
+  }
+  if (positional.length > maxPositional) {
+    throw new Error(`Unexpected positional argument "${positional[maxPositional]}" for "${displayCmd}".`);
+  }
+}
 
 /** @param {string[]} args */
 function parseFlags(args) {
@@ -144,6 +203,7 @@ export function runCli(rawArgs = process.argv.slice(2)) {
   const dataDir = resolveDataDir(flags['data-dir'], process.env, flags.home || null);
 
   if (command === 'lang' || command === 'language') {
+    assertCommandArgs(command, 'lang', flags, positional, 1);
     const target = positional[0] || flags.language;
     const current = loadPreferences(dataDir);
     if (!target) {
@@ -166,6 +226,7 @@ export function runCli(rawArgs = process.argv.slice(2)) {
   }
 
   if (command === 'stats' || command === 'usage') {
+    assertCommandArgs(command, 'stats', flags, positional, 0);
     const prefs = loadPreferences(dataDir);
     const language = flags.language
       ? parseLanguageStrict(flags.language)
@@ -235,11 +296,18 @@ export function runCli(rawArgs = process.argv.slice(2)) {
   }
 
   if (command === 'preview') {
+    assertCommandArgs(command, 'preview', flags, positional, 0);
     const width = flags.width ? Number(flags.width) : undefined;
     if (width !== undefined && (!Number.isInteger(width) || width < 20 || width > 500)) {
       throw new Error(`Invalid width: ${flags.width}`);
     }
     const language = flags.language ? parseLanguageStrict(flags.language) : undefined;
+    const showCache =
+      flags['show-cache'] !== undefined
+        ? parseBool(flags['show-cache'], 'show-cache')
+        : undefined;
+    const showCost =
+      flags['show-cost'] !== undefined ? parseBool(flags['show-cost'], 'show-cost') : undefined;
     const sample = buildSyntheticStatusPayload(Boolean(flags.argon));
     const output = runStatusLine(sample, {
       synthetic: true,
@@ -248,13 +316,16 @@ export function runCli(rawArgs = process.argv.slice(2)) {
       width,
       noColor: Boolean(flags['no-color']),
       json: Boolean(flags.json),
-      dataDir: flags['data-dir'],
+      showCache,
+      showCost,
+      dataDir,
     });
     process.stdout.write(output + '\n');
     return;
   }
 
   if (command === 'install') {
+    assertCommandArgs(command, 'install', flags, positional, 0);
     const language = flags.language ? parseLanguageStrict(flags.language) : null;
     const res = installStatusLine({
       sourceRoot: SOURCE_ROOT,
@@ -274,6 +345,7 @@ export function runCli(rawArgs = process.argv.slice(2)) {
   }
 
   if (command === 'uninstall') {
+    assertCommandArgs(command, 'uninstall', flags, positional, 0);
     const res = uninstallStatusLine({ homeDir: flags.home });
     if (!res.removed) {
       process.stdout.write('Antigravity Dashboard CLI statusLine is not installed.\n');
@@ -288,6 +360,7 @@ export function runCli(rawArgs = process.argv.slice(2)) {
   }
 
   if (command === 'status') {
+    assertCommandArgs(command, 'status', flags, positional, 0);
     const info = inspectStatusLine({ homeDir: flags.home, dataDir: flags['data-dir'] });
     const preferences = loadPreferences(info.dataDir);
     process.stdout.write(JSON.stringify({ ...info, preferences }, null, 2) + '\n');
@@ -295,6 +368,7 @@ export function runCli(rawArgs = process.argv.slice(2)) {
   }
 
   if (command === 'config') {
+    assertCommandArgs(command, 'config', flags, positional, 0);
     /** @type {{ language?: string, showCache?: boolean, showCost?: boolean }} */
     const patch = {};
     if (flags.language !== undefined) patch.language = parseLanguageStrict(flags.language);

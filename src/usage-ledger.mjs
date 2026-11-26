@@ -11,7 +11,6 @@ export {
   createEmptyUsageLedger,
   discoverTranscriptFiles,
   parsePlannerResponseEntry,
-  recordObservedCliCost,
   sanitizeUsageLedger,
   scanSingleTranscriptIntoLedger,
   syncUsageLedger,

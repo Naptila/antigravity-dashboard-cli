@@ -27,7 +27,6 @@ const STATS_LABELS = {
     requests: 'Requests',
     estCost: 'Est. Cost',
     cacheSaved: 'Cache Saved',
-    cliCost: 'CLI Reported Cost',
     heatmapTitle: 'Activity Heatmap (Last 12 Weeks)',
     less: 'Less',
     more: 'More',
@@ -67,7 +66,6 @@ const STATS_LABELS = {
     requests: '请求数',
     estCost: '估算花销',
     cacheSaved: '缓存节省',
-    cliCost: 'CLI 实报花销',
     heatmapTitle: '近 12 周活跃热力图',
     less: '低',
     more: '高',
@@ -107,7 +105,6 @@ const STATS_LABELS = {
     requests: '請求數',
     estCost: '估算花費',
     cacheSaved: '快取節省',
-    cliCost: 'CLI 實報花費',
     heatmapTitle: '近 12 週活躍熱力圖',
     less: '低',
     more: '高',
@@ -140,6 +137,17 @@ const STATS_LABELS = {
 function fmtMoney(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '--';
   return formatUsd(value) || '$0.00';
+}
+
+/**
+ * Formats bucket USD metrics, returning `'--'` when no requests in `bucket` matched a pricing rule.
+ * @param {{ pricedRequests?: number } | null | undefined} bucket
+ * @param {unknown} value
+ * @returns {string}
+ */
+function fmtBucketMoney(bucket, value) {
+  if (!bucket || !(Number(bucket.pricedRequests) > 0)) return '--';
+  return fmtMoney(value);
 }
 
 /**
@@ -291,24 +299,10 @@ export function renderUsageReport(
         true
       ),
       subtle(padStartDisplay(String(bucket.requests ?? 0), 5)),
-      part(padStartDisplay(fmtMoney(bucket.estimatedUsd), 9), 32, true),
-      part(padStartDisplay(fmtMoney(bucket.cacheSavedUsd), 9), 33),
+      part(padStartDisplay(fmtBucketMoney(bucket, bucket.estimatedUsd), 9), 32, true),
+      part(padStartDisplay(fmtBucketMoney(bucket, bucket.cacheSavedUsd), 9), 33),
     ];
     lines.push(paintParts(row, maxWidth, color));
-  }
-
-  if (report?.cliReportedCost && report.cliReportedCost.totalUsd > 0) {
-    lines.push(
-      paintParts(
-        [
-          subtle(`${l.cliCost}: `),
-          part(fmtMoney(report.cliReportedCost.totalUsd), 32, true),
-          subtle(` (${report.cliReportedCost.conversations} conv)`),
-        ],
-        maxWidth,
-        color
-      )
-    );
   }
 
   lines.push('');
@@ -354,8 +348,8 @@ export function renderUsageReport(
           padStartDisplay(formatPercentage(row.cacheRate), 7),
           row.cacheRate !== null ? 35 : 39
         ),
-        part(padStartDisplay(fmtMoney(row.estimatedUsd), 9), 32),
-        part(padStartDisplay(fmtMoney(row.cacheSavedUsd), 9), 33),
+        part(padStartDisplay(fmtBucketMoney(row, row.estimatedUsd), 9), 32),
+        part(padStartDisplay(fmtBucketMoney(row, row.cacheSavedUsd), 9), 33),
       ];
       if (showBar) {
         parts.push(subtle('  '), ...renderMiniBar(ratio, 10, 36));
@@ -394,8 +388,8 @@ export function renderUsageReport(
         subtle(padStartDisplay(formatPercentage(sharePct), 7)),
         part(padStartDisplay(compactNumber(m.cacheReadTokens), 8), 35),
         part(padStartDisplay(formatPercentage(m.cacheRate), 7), m.cacheRate !== null ? 35 : 39),
-        part(padStartDisplay(fmtMoney(m.estimatedUsd), 9), 32, true),
-        part(padStartDisplay(fmtMoney(m.cacheSavedUsd), 9), 33),
+        part(padStartDisplay(fmtBucketMoney(m, m.estimatedUsd), 9), 32, true),
+        part(padStartDisplay(fmtBucketMoney(m, m.cacheSavedUsd), 9), 33),
       ];
       lines.push(paintParts(mParts, maxWidth, color));
     }
@@ -447,13 +441,7 @@ export function renderUsageReportMarkdown(report, { language = 'en' } = {}) {
   ];
   for (const [label, b] of overviewRows) {
     out.push(
-      `| **${label}** | **${compactNumber(b.totalTokens)}** | ${compactNumber(b.cacheReadTokens)} | ${compactNumber(b.inputTokens)} | ${compactNumber(b.outputTokens)} | ${formatPercentage(b.cacheRate)} | ${b.requests} | **${fmtMoney(b.estimatedUsd)}** | ${fmtMoney(b.cacheSavedUsd)} |`
-    );
-  }
-  if (report?.cliReportedCost && report.cliReportedCost.totalUsd > 0) {
-    out.push('');
-    out.push(
-      `> ${l.cliCost}: **${fmtMoney(report.cliReportedCost.totalUsd)}** (${report.cliReportedCost.conversations} conv)`
+      `| **${label}** | **${compactNumber(b.totalTokens)}** | ${compactNumber(b.cacheReadTokens)} | ${compactNumber(b.inputTokens)} | ${compactNumber(b.outputTokens)} | ${formatPercentage(b.cacheRate)} | ${b.requests} | **${fmtBucketMoney(b, b.estimatedUsd)}** | ${fmtBucketMoney(b, b.cacheSavedUsd)} |`
     );
   }
   out.push('');
@@ -479,7 +467,7 @@ export function renderUsageReportMarkdown(report, { language = 'en' } = {}) {
     out.push('| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |');
     for (const row of periods) {
       out.push(
-        `| ${row.period} | ${row.requests} | **${compactNumber(row.totalTokens)}** | ${compactNumber(row.cacheReadTokens)} | ${compactNumber(row.inputTokens)} | ${compactNumber(row.outputTokens)} | ${formatPercentage(row.cacheRate)} | ${fmtMoney(row.estimatedUsd)} | ${fmtMoney(row.cacheSavedUsd)} |`
+        `| ${row.period} | ${row.requests} | **${compactNumber(row.totalTokens)}** | ${compactNumber(row.cacheReadTokens)} | ${compactNumber(row.inputTokens)} | ${compactNumber(row.outputTokens)} | ${formatPercentage(row.cacheRate)} | ${fmtBucketMoney(row, row.estimatedUsd)} | ${fmtBucketMoney(row, row.cacheSavedUsd)} |`
       );
     }
   }
@@ -499,7 +487,7 @@ export function renderUsageReportMarkdown(report, { language = 'en' } = {}) {
       const sharePct = (m.totalTokens / grandTotal) * 100;
       const safeModel = String(m.model || 'unknown').replace(/`/g, '');
       out.push(
-        `| \`${safeModel}\` | ${m.requests} | **${compactNumber(m.totalTokens)}** | ${formatPercentage(sharePct)} | ${compactNumber(m.cacheReadTokens)} | ${formatPercentage(m.cacheRate)} | **${fmtMoney(m.estimatedUsd)}** | ${fmtMoney(m.cacheSavedUsd)} |`
+        `| \`${safeModel}\` | ${m.requests} | **${compactNumber(m.totalTokens)}** | ${formatPercentage(sharePct)} | ${compactNumber(m.cacheReadTokens)} | ${formatPercentage(m.cacheRate)} | **${fmtBucketMoney(m, m.estimatedUsd)}** | ${fmtBucketMoney(m, m.cacheSavedUsd)} |`
       );
     }
   }

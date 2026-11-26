@@ -46,7 +46,6 @@ import { sanitizeUsageLedger, toNonNegSafeInt } from './transcript-reader.mjs';
  *     allTime: AggregatedBucket,
  *     selectedRange: AggregatedBucket,
  *   },
- *   cliReportedCost: { totalUsd: number, conversations: number },
  *   periods: Array<AggregatedBucket & { period: string }>,
  *   models: Array<AggregatedBucket & { model: string }>,
  *   heatmap: Array<{ date: string, dayOfWeek: number, totalTokens: number }>,
@@ -514,15 +513,6 @@ export function buildUsageReport(
     addToAccumulator(mAcc, convHash, input, cacheRead, cacheWrite, output, cost);
   }
 
-  let cliReportedUsd = 0;
-  let cliReportedConversations = 0;
-  for (const meta of Object.values(ledger.files)) {
-    if (typeof meta?.cliCostUsd === 'number' && Number.isFinite(meta.cliCostUsd) && meta.cliCostUsd > 0) {
-      cliReportedUsd += meta.cliCostUsd;
-      cliReportedConversations += 1;
-    }
-  }
-
   const periods = [...periodMap.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([period, acc]) => ({ period, ...finalizeAccumulator(acc) }));
@@ -554,10 +544,6 @@ export function buildUsageReport(
       thisMonth: finalizeAccumulator(monthAcc),
       allTime: finalizeAccumulator(allTimeAcc),
       selectedRange: finalizeAccumulator(rangeAcc),
-    },
-    cliReportedCost: {
-      totalUsd: Number(cliReportedUsd.toFixed(6)),
-      conversations: cliReportedConversations,
     },
     periods,
     models,

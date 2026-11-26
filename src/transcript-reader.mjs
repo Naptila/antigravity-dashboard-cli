@@ -22,8 +22,6 @@ export { USAGE_LEDGER_SCHEMA };
  *   size: number,
  *   mtimeMs: number,
  *   lastStepIndex: number,
- *   cliCostUsd: number | null,
- *   cliSubagentUsd: number | null,
  * }} LedgerFileCursor
  *
  * @typedef {{
@@ -90,8 +88,6 @@ function createEmptyFileCursor() {
     size: 0,
     mtimeMs: 0,
     lastStepIndex: -1,
-    cliCostUsd: null,
-    cliSubagentUsd: null,
   };
 }
 
@@ -120,14 +116,6 @@ export function sanitizeUsageLedger(raw) {
         size: toNonNegSafeInt(val.size),
         mtimeMs: typeof val.mtimeMs === 'number' && Number.isFinite(val.mtimeMs) && val.mtimeMs >= 0 ? val.mtimeMs : 0,
         lastStepIndex: Number.isSafeInteger(val.lastStepIndex) ? val.lastStepIndex : -1,
-        cliCostUsd:
-          typeof val.cliCostUsd === 'number' && Number.isFinite(val.cliCostUsd) && val.cliCostUsd >= 0
-            ? val.cliCostUsd
-            : null,
-        cliSubagentUsd:
-          typeof val.cliSubagentUsd === 'number' && Number.isFinite(val.cliSubagentUsd) && val.cliSubagentUsd >= 0
-            ? val.cliSubagentUsd
-            : null,
       };
     }
   }
@@ -583,45 +571,4 @@ export function syncUsageLedger({
   }
 
   return { ledger, scannedConversations: targets.length, changed };
-}
-
-/**
- * Records official CLI-reported session cost into the ledger so spend persists across sessions.
- * @param {string} dataDir
- * @param {string} convId
- * @param {{ totalUsd?: number | null, subagentUsd?: number | null }} [costs]
- * @param {number} [now=Date.now()]
- * @returns {boolean}
- */
-export function recordObservedCliCost(
-  dataDir,
-  convId,
-  { totalUsd = null, subagentUsd = null } = {},
-  now = Date.now()
-) {
-  if (!dataDir || !convId || (totalUsd === null && subagentUsd === null)) return false;
-  const ledgerPath = usageLedgerFilePath(dataDir);
-  const ledger = sanitizeUsageLedger(readJsonSafe(ledgerPath));
-  const convHash = hashKey(convId);
-  const prev = ledger.files[convHash] || createEmptyFileCursor();
-
-  const nextTotal =
-    typeof totalUsd === 'number' && Number.isFinite(totalUsd) && totalUsd >= 0
-      ? Math.max(prev.cliCostUsd ?? 0, totalUsd)
-      : prev.cliCostUsd;
-  const nextSub =
-    typeof subagentUsd === 'number' && Number.isFinite(subagentUsd) && subagentUsd >= 0
-      ? Math.max(prev.cliSubagentUsd ?? 0, subagentUsd)
-      : prev.cliSubagentUsd;
-
-  if (nextTotal === prev.cliCostUsd && nextSub === prev.cliSubagentUsd) return false;
-
-  ledger.files[convHash] = {
-    ...prev,
-    cliCostUsd: nextTotal,
-    cliSubagentUsd: nextSub,
-  };
-  ledger.updatedAt = new Date(now).toISOString();
-  writeJsonAtomic(ledgerPath, ledger);
-  return true;
 }

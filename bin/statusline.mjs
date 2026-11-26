@@ -18,12 +18,24 @@ Options:
   --preview-argon           Render synthetic Argon preview
   --no-stack                Include second metadata row (when not stacked with built-in bar)
   --language en|zh-CN|zh-TW Override language preference (aliases: zh, tw)
+  --show-cache true|false   Override cache segment visibility
+  --show-cost true|false    Override session cost segment visibility
   --width 20..500           Override terminal width
   --data-dir <path>         Override preferences directory
   --no-color                Disable ANSI colors
   --json                    Print normalized, whitelisted metrics JSON
   --help                    Show this help
 `;
+
+/**
+ * @param {string | undefined} value
+ * @param {string} flag
+ */
+function parseBoolArg(value, flag) {
+  if (value === 'true' || value === '1') return true;
+  if (value === 'false' || value === '0') return false;
+  throw new Error(`Expected true or false for ${flag}`);
+}
 
 /** @param {string[]} argv */
 function parseArgs(argv) {
@@ -40,6 +52,10 @@ function parseArgs(argv) {
     else if (arg === '--language') {
       const value = argv[++i];
       opts.language = parseLanguageStrict(value);
+    } else if (arg === '--show-cache') {
+      opts.showCache = parseBoolArg(argv[++i], '--show-cache');
+    } else if (arg === '--show-cost') {
+      opts.showCost = parseBoolArg(argv[++i], '--show-cost');
     } else if (arg === '--width') {
       const value = Number(argv[++i]);
       if (!Number.isInteger(value) || value < 20 || value > 500) {
@@ -134,6 +150,8 @@ export function buildSyntheticStatusPayload(argon = false, now = Date.now()) {
  *   width?: number,
  *   noColor?: boolean,
  *   json?: boolean,
+ *   showCache?: boolean,
+ *   showCost?: boolean,
  *   dataDir?: string,
  *   env?: NodeJS.ProcessEnv,
  * }} [opts]
@@ -162,8 +180,8 @@ export function runStatusLine(payload, opts = {}, now = Date.now()) {
     width: opts.width || metrics.width,
     color: shouldUseColor(Boolean(opts.noColor), env),
     stacked: opts.stacked !== false,
-    showCache: prefs.showCache,
-    showCost: prefs.showCost,
+    showCache: typeof opts.showCache === 'boolean' ? opts.showCache : prefs.showCache,
+    showCost: typeof opts.showCost === 'boolean' ? opts.showCost : prefs.showCost,
     now,
   });
 }
