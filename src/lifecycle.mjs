@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import {
   INSTALL_NAME,
   INSTALL_SCHEMA_VERSION,
+  PLUGIN_VERSION,
   STATUSLINE_RUNTIME_FILES,
   SUPPORTED_LANGUAGES,
 } from './constants.mjs';
@@ -186,6 +187,7 @@ function copyRuntimeFiles(sourceRoot, runtimeDir) {
   fs.mkdirSync(runtimeDir, { recursive: true });
   writeJsonAtomic(path.join(runtimeDir, 'installation.json'), {
     name: INSTALL_NAME,
+    version: PLUGIN_VERSION,
     schema: INSTALL_SCHEMA_VERSION,
     installedAt: new Date().toISOString(),
   });

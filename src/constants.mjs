@@ -1,6 +1,7 @@
 // @ts-check
 
 export const INSTALL_NAME = 'antigravity-dashboard-cli';
+export const PLUGIN_VERSION = '0.1.0';
 export const INSTALL_SCHEMA_VERSION = 1;
 export const USAGE_LEDGER_SCHEMA = 1;
 

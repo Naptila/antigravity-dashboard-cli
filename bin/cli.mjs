@@ -3,6 +3,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { shouldUseColor } from '../src/ansi.mjs';
+import { PLUGIN_VERSION } from '../src/constants.mjs';
 import { parseLanguageStrict, resolveLanguage } from '../src/i18n.mjs';
 import {
   inspectStatusLine,
@@ -86,6 +87,8 @@ function parseFlags(args) {
     '--markdown',
     '--md',
     '--rebuild',
+    '--version',
+    '-v',
     '--help',
     '-h',
   ]);
@@ -125,6 +128,11 @@ export function runCli(rawArgs = process.argv.slice(2)) {
   if (rawArgs.length > 0 && !rawArgs[0].startsWith('-')) {
     command = rawArgs[0];
     rest = rawArgs.slice(1);
+  }
+
+  if (command === 'version' || rawArgs.includes('--version') || rawArgs.includes('-v')) {
+    process.stdout.write(`${PLUGIN_VERSION}\n`);
+    return;
   }
 
   if (command === 'help' || rawArgs.includes('--help') || rawArgs.includes('-h')) {

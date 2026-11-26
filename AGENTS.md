@@ -115,3 +115,50 @@ To test `stats`, `lang`, `config`, or `install` manually from the terminal witho
    - Include `// @ts-check` and JSDoc `@typedef` / `@param` / `@returns` annotations on modules and exported functions.
    - Sanitize external JSON inputs (`transcript.jsonl`, `usage-v1.json`, `pricing.json`, `preferences.json`, `stdin` payloads) with safe fallbacks so malformed, empty, or missing files never crash or produce `NaN` metrics.
    - Hooks (`src/hook-handler.mjs`) must fail open (`{}`) on unexpected exceptions; `bin/statusline.mjs` must degrade gracefully (`ctx --`).
+
+---
+
+## 6. Internal Storage, Overrides & Packaging
+
+### Local State & Cache Schemas (`~/.gemini/antigravity-cli/dashboard-cli-data/`)
+- **`preferences.json`**: `{ language: "en" | "zh-CN" | "zh-TW", showCache: boolean, showCost: boolean, updatedAt: string }`.
+- **`usage-v1.json`**: Schema `1` incremental ledger (`{ schema: 1, updatedAt, models: string[], files: Record<convHash, Cursor>, records: Tuple[] }`).
+- **`pricing.json`** *(optional)*: User model pricing overrides (`USD / 1M tokens` for `input`, `cacheRead`, `cacheWrite`, `output`).
+
+### Internal & Isolation Environment Variables
+- `AGY_DASHBOARD_DATA_DIR`: Overrides the `dashboard-cli-data` directory path.
+- `AGY_BRAIN_DIR`: Overrides the `brain` transcript root directory path.
+- `AGY_CLI_HOME`: Overrides the `~/.gemini/antigravity-cli` base directory when `--home` is not explicitly provided.
+- `AGY_CLI_AUTO_COMPACT_OVERRIDE`: Compaction ceiling (`512K`, `80%`, `off`) honored by `statusLine`.
+- `NO_COLOR`: Disables ANSI color escapes across CLI and `statusLine` outputs.
+
+### Clean Package Allowlist
+`package.json` restricts published tarballs via `"files"` to runtime and plugin assets only (`bin/`, `src/`, `skills/`, `assets/`, `plugin.json`, `hooks.json`, `README.md`, `README.zh-CN.md`, `LICENSE`), excluding `tests/`, `scripts/`, `.github/`, `AGENTS.md`, and local caches. Verify anytime with `npm pack --dry-run`.
+
+---
+
+## 7. CI/CD & Release Workflow
+
+Version numbers are locked identically across `package.json`, `plugin.json`, and `src/constants.mjs` (`PLUGIN_VERSION`) via `scripts/release-bump.mjs`:
+
+```sh
+# Verify all manifests & constants match (and optionally match a git release tag)
+npm run release:check
+node scripts/release-bump.mjs --check --tag v0.1.0
+
+# Synchronize a new X.Y.Z release version across package.json, plugin.json & src/constants.mjs
+npm run release:bump -- 0.1.1
+
+# Validate plugin manifest, hooks, skills, and assets in pure Node.js
+node scripts/release-bump.mjs --validate-plugin
+```
+
+### GitHub Actions Pipelines
+- **CI (`.github/workflows/ci.yml`)**: Runs on `push` to `main` and `pull_request` across Node.js `20` and `22` (`npm run check`, `node scripts/release-bump.mjs --check`, `npm test`, `npm pack --dry-run`, `node scripts/release-bump.mjs --validate-plugin`, and `agy plugin validate .` when `agy` is available).
+- **Release (`.github/workflows/release.yml`)**: Triggered on `v*.*.*` tags with `permissions: contents: write`. Verifies `${GITHUB_REF_NAME}` matches `package.json`, `plugin.json`, and `src/constants.mjs`, runs checks and tests, builds `<name>-<version>.tgz` + `<name>-<version>.tgz.sha256`, and publishes a GitHub Release via `softprops/action-gh-release@v2`.
+
+### Cutting a Release
+1. Run `npm run release:bump -- X.Y.Z`.
+2. Run `npm run check && npm run release:check && npm test && npm pack --dry-run`.
+3. Commit with `git commit -m "chore(release): vX.Y.Z"` and create an annotated tag `git tag -a vX.Y.Z -m "Release vX.Y.Z"`.
+4. Push `main` and the `vX.Y.Z` tag to trigger `.github/workflows/release.yml`.
