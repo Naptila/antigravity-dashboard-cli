@@ -1,32 +1,23 @@
 #!/usr/bin/env node
+// @ts-check
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { shouldUseColor } from '../src/ansi.mjs';
+import { parseLanguageStrict, resolveLanguage } from '../src/i18n.mjs';
 import {
   inspectStatusLine,
   installStatusLine,
   uninstallStatusLine,
 } from '../src/lifecycle.mjs';
-import { renderUsageReport } from '../src/stats-render.mjs';
-import { loadPreferences, resolveDataDir, savePreferences } from '../src/store.mjs';
-import { buildUsageReport, defaultBrainDir, syncUsageLedger } from '../src/usage-ledger.mjs';
+import { renderUsageReport, renderUsageReportMarkdown } from '../src/stats-render.mjs';
+import { defaultBrainDir, loadPreferences, resolveDataDir, savePreferences } from '../src/store.mjs';
+import { syncUsageLedger } from '../src/transcript-reader.mjs';
+import { buildUsageReport, parseIsoDateStrict } from '../src/usage-aggregator.mjs';
 import { buildSyntheticStatusPayload, runStatusLine } from './statusline.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SOURCE_ROOT = path.resolve(__dirname, '..');
-
-const LANGUAGE_ALIASES = {
-  en: 'en',
-  english: 'en',
-  zh: 'zh-CN',
-  cn: 'zh-CN',
-  'zh-cn': 'zh-CN',
-  'zh_cn': 'zh-CN',
-  tw: 'zh-TW',
-  'zh-tw': 'zh-TW',
-  'zh_tw': 'zh-TW',
-};
 
 const HELP = `Antigravity Dashboard CLI (dash)
 
@@ -41,10 +32,10 @@ Commands:
                       --to YYYY-MM-DD        End date (inclusive)
                       --by day|week|month    Grouping granularity (default: day)
                       --model <substr>       Filter by model name substring
-                      --tz local|utc+8|utc   Timezone for date grouping (default: local)
+                      --tz local|utc+8|IANA  Timezone for date grouping (default: local)
                       --rebuild              Force full rescan of brain transcripts
                       --language en|zh-CN|zh-TW
-                      --width N  --no-color  --json
+                      --width N  --no-color  --markdown (--md)  --json
 
   lang       Show or switch language live for both statusLine & /dash:stats (default: en)
              Usage:   node bin/cli.mjs lang [en|zh-CN|zh-TW|zh|tw|toggle]
@@ -65,17 +56,11 @@ Commands:
   help       Show this help
 `;
 
-function normalizeLanguageInput(raw) {
-  if (!raw) return null;
-  const mapped = LANGUAGE_ALIASES[String(raw).trim().toLowerCase()];
-  if (!mapped) {
-    throw new Error(`Unsupported language "${raw}". Use en, zh-CN (zh), or zh-TW (tw).`);
-  }
-  return mapped;
-}
-
+/** @param {string[]} args */
 function parseFlags(args) {
+  /** @type {Record<string, any>} */
   const flags = {};
+  /** @type {string[]} */
   const positional = [];
   const valueFlags = new Set([
     '--language',
@@ -98,6 +83,8 @@ function parseFlags(args) {
     '--no-stack',
     '--no-color',
     '--json',
+    '--markdown',
+    '--md',
     '--rebuild',
     '--help',
     '-h',
@@ -106,7 +93,8 @@ function parseFlags(args) {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (boolFlags.has(arg)) {
-      flags[arg.replace(/^--?/, '')] = true;
+      const key = arg === '--md' ? 'markdown' : arg.replace(/^--?/, '');
+      flags[key] = true;
     } else if (valueFlags.has(arg)) {
       const value = args[++i];
       if (value === undefined) throw new Error(`Missing value for ${arg}`);
@@ -120,21 +108,17 @@ function parseFlags(args) {
   return { flags, positional };
 }
 
+/**
+ * @param {string} value
+ * @param {string} name
+ */
 function parseBool(value, name) {
   if (value === 'true' || value === '1') return true;
   if (value === 'false' || value === '0') return false;
   throw new Error(`Expected true or false for --${name}`);
 }
 
-function parseIsoDate(value, name) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    throw new Error(`Invalid date for --${name}: "${value}". Expected YYYY-MM-DD.`);
-  }
-  return value;
-}
-
-function main() {
-  const rawArgs = process.argv.slice(2);
+export function runCli(rawArgs = process.argv.slice(2)) {
   let command = 'stats';
   let rest = rawArgs;
 
@@ -149,7 +133,7 @@ function main() {
   }
 
   const { flags, positional } = parseFlags(rest);
-  const dataDir = resolveDataDir(flags['data-dir']);
+  const dataDir = resolveDataDir(flags['data-dir'], process.env, flags.home || null);
 
   if (command === 'lang' || command === 'language') {
     const target = positional[0] || flags.language;
@@ -167,7 +151,7 @@ function main() {
         ? current.language === 'en'
           ? 'zh-CN'
           : 'en'
-        : normalizeLanguageInput(target);
+        : parseLanguageStrict(target);
     const updated = savePreferences(dataDir, { language: nextLang });
     process.stdout.write(`Language switched to: ${updated.language}\n`);
     return;
@@ -175,15 +159,18 @@ function main() {
 
   if (command === 'stats' || command === 'usage') {
     const prefs = loadPreferences(dataDir);
-    const language = flags.language ? normalizeLanguageInput(flags.language) : prefs.language;
+    const language = flags.language
+      ? parseLanguageStrict(flags.language)
+      : resolveLanguage(prefs.language);
     const groupBy = flags.by || 'day';
-    if (!['day', 'week', 'month'].includes(groupBy)) {
+    if (groupBy !== 'day' && groupBy !== 'week' && groupBy !== 'month') {
       throw new Error(`Invalid --by value "${groupBy}". Expected day, week, or month.`);
     }
 
+    /** @type {number | 'all'} */
     let days = 14;
     if (flags.days !== undefined) {
-      if (flags.days.toLowerCase() === 'all') {
+      if (String(flags.days).toLowerCase() === 'all') {
         days = 'all';
       } else {
         const parsedDays = Number(flags.days);
@@ -194,9 +181,11 @@ function main() {
       }
     }
 
-    const from = flags.from ? parseIsoDate(flags.from, 'from') : null;
-    const to = flags.to ? parseIsoDate(flags.to, 'to') : null;
-    const brainDir = flags['brain-dir'] || defaultBrainDir(flags.home);
+    const from = flags.from ? parseIsoDateStrict(flags.from, 'from') : null;
+    const to = flags.to ? parseIsoDateStrict(flags.to, 'to') : null;
+    const brainDir = flags['brain-dir']
+      ? path.resolve(flags['brain-dir'])
+      : defaultBrainDir(flags.home || null);
 
     const { ledger } = syncUsageLedger({
       dataDir,
@@ -219,7 +208,15 @@ function main() {
       return;
     }
 
+    if (flags.markdown) {
+      process.stdout.write(renderUsageReportMarkdown(report, { language }) + '\n');
+      return;
+    }
+
     const width = flags.width ? Number(flags.width) : process.stdout.columns || 110;
+    if (!Number.isFinite(width) || width < 20 || width > 500) {
+      throw new Error(`Invalid --width value: ${flags.width}`);
+    }
     const output = renderUsageReport(report, {
       language,
       width,
@@ -234,7 +231,7 @@ function main() {
     if (width !== undefined && (!Number.isInteger(width) || width < 20 || width > 500)) {
       throw new Error(`Invalid width: ${flags.width}`);
     }
-    const language = flags.language ? normalizeLanguageInput(flags.language) : undefined;
+    const language = flags.language ? parseLanguageStrict(flags.language) : undefined;
     const sample = buildSyntheticStatusPayload(Boolean(flags.argon));
     const output = runStatusLine(sample, {
       synthetic: true,
@@ -250,7 +247,7 @@ function main() {
   }
 
   if (command === 'install') {
-    const language = flags.language ? normalizeLanguageInput(flags.language) : null;
+    const language = flags.language ? parseLanguageStrict(flags.language) : null;
     const res = installStatusLine({
       sourceRoot: SOURCE_ROOT,
       homeDir: flags.home,
@@ -261,7 +258,9 @@ function main() {
       noColor: Boolean(flags['no-color']),
     });
     process.stdout.write(`Installed statusLine runtime: ${res.runtimeDir}\n`);
-    process.stdout.write(`Updated settings: ${res.settingsFile} (stack_with_default: ${res.stacked})\n`);
+    process.stdout.write(
+      `Updated settings: ${res.settingsFile} (stack_with_default: ${res.stacked})\n`
+    );
     process.stdout.write(`Reopen agy (or run /statusline on) to activate.\n`);
     return;
   }
@@ -288,10 +287,15 @@ function main() {
   }
 
   if (command === 'config') {
+    /** @type {{ language?: string, showCache?: boolean, showCost?: boolean }} */
     const patch = {};
-    if (flags.language !== undefined) patch.language = normalizeLanguageInput(flags.language);
-    if (flags['show-cache'] !== undefined) patch.showCache = parseBool(flags['show-cache'], 'show-cache');
-    if (flags['show-cost'] !== undefined) patch.showCost = parseBool(flags['show-cost'], 'show-cost');
+    if (flags.language !== undefined) patch.language = parseLanguageStrict(flags.language);
+    if (flags['show-cache'] !== undefined) {
+      patch.showCache = parseBool(flags['show-cache'], 'show-cache');
+    }
+    if (flags['show-cost'] !== undefined) {
+      patch.showCost = parseBool(flags['show-cost'], 'show-cost');
+    }
 
     if (Object.keys(patch).length === 0) {
       process.stdout.write(JSON.stringify(loadPreferences(dataDir), null, 2) + '\n');
@@ -305,9 +309,16 @@ function main() {
   throw new Error(`Unknown command: ${command}. Run \`node bin/cli.mjs help\` for usage.`);
 }
 
-try {
-  main();
-} catch (err) {
-  process.stderr.write(`Error: ${err.message}\n`);
-  process.exitCode = 1;
+const isDirectRun =
+  process.argv[1] &&
+  (process.argv[1].endsWith('cli.mjs') || process.argv[1].includes('agy-dashboard'));
+
+if (isDirectRun) {
+  try {
+    runCli();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`Error: ${msg}\n`);
+    process.exitCode = 1;
+  }
 }

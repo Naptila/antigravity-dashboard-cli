@@ -1,13 +1,62 @@
+// @ts-check
 import { cleanText, displayWidth, paintParts, part, plainText, subtle } from './ansi.mjs';
 import { formatUsd } from './i18n.mjs';
 import { parseAutoCompactOverride } from './store.mjs';
 
+/**
+ * @typedef {{
+ *   id: string,
+ *   disabled: boolean,
+ *   remaining: number | null,
+ *   resetInSeconds: number | null,
+ *   resetTime: number | null,
+ * }} QuotaBucket
+ *
+ * @typedef {{
+ *   model: string | null,
+ *   modelId: string | null,
+ *   effort: string | null,
+ *   state: string | null,
+ *   cycleMode: string | null,
+ *   taskCount: number,
+ *   subagentCount: number,
+ *   width: number,
+ *   context: {
+ *     usedPercentage: number | null,
+ *     rawPercentage: number | null,
+ *     usedTokens: number | null,
+ *     effectiveLimit: number | null,
+ *     capacity: number | null,
+ *     basis: string,
+ *   },
+ *   cachePct: number | null,
+ *   costUsd: number | null,
+ *   quotas: {
+ *     family: string | null,
+ *     fiveHour: QuotaBucket | null,
+ *     weekly: QuotaBucket | null,
+ *     argonWeekly: QuotaBucket | null,
+ *   },
+ * }} StatusLineMetrics
+ */
+
 const BUSY_STATES = new Set(['thinking', 'working', 'running', 'tool_use', 'initializing']);
 
-const asObject = value => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
+/** @param {unknown} value */
+const asObject = value =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? /** @type {Record<string, any>} */ (value)
+    : {};
+
+/** @param {unknown} value */
 const asNonNegNumber = value =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
-const asNonNegInt = value => (Number.isSafeInteger(value) && value >= 0 ? value : null);
+
+/** @param {unknown} value */
+const asNonNegInt = value =>
+  Number.isSafeInteger(value) && /** @type {number} */ (value) >= 0
+    ? /** @type {number} */ (value)
+    : null;
 
 const LABELS = {
   en: {
@@ -15,32 +64,37 @@ const LABELS = {
     of: 'of',
     cache: 'cache',
     resets: 'resets',
-    modeOn: mode => `${mode} mode on`,
-    task: n => (n === 1 ? '1 task' : `${n} tasks`),
-    agent: n => (n === 1 ? '1 agent' : `${n} agents`),
+    modeOn: (/** @type {string} */ mode) => `${mode} mode on`,
+    task: (/** @type {number} */ n) => (n === 1 ? '1 task' : `${n} tasks`),
+    agent: (/** @type {number} */ n) => (n === 1 ? '1 agent' : `${n} agents`),
   },
   'zh-CN': {
     ctx: '上下文',
     of: '/',
     cache: '缓存',
     resets: '重置',
-    modeOn: mode => `${mode} 模式`,
-    task: n => `${n} 任务`,
-    agent: n => `${n} 子代理`,
+    modeOn: (/** @type {string} */ mode) => `${mode} 模式`,
+    task: (/** @type {number} */ n) => `${n} 任务`,
+    agent: (/** @type {number} */ n) => `${n} 子代理`,
   },
   'zh-TW': {
     ctx: '上下文',
     of: '/',
     cache: '快取',
     resets: '重設',
-    modeOn: mode => `${mode} 模式`,
-    task: n => `${n} 任務`,
-    agent: n => `${n} 子代理`,
+    modeOn: (/** @type {string} */ mode) => `${mode} 模式`,
+    task: (/** @type {number} */ n) => `${n} 任務`,
+    agent: (/** @type {number} */ n) => `${n} 子代理`,
   },
 };
 
+/**
+ * Formats a context ceiling in thousands (`512K`, `1000K`).
+ * @param {unknown} tokens
+ * @returns {string | null}
+ */
 export function formatLimitK(tokens) {
-  if (!Number.isFinite(tokens) || tokens <= 0) return null;
+  if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0) return null;
   if (tokens >= 1000) {
     const k = Math.round(tokens / 1000);
     return `${k}K`;
@@ -48,7 +102,20 @@ export function formatLimitK(tokens) {
   return String(Math.round(tokens));
 }
 
-export function formatClockReset(quota, now = Date.now(), tzOffsetMinutes = null, { dateOnlyIfFar = false } = {}) {
+/**
+ * Formats a quota reset timestamp into a local wall-clock time (`18:30` or `12/03`).
+ * @param {QuotaBucket | null | undefined} quota
+ * @param {number} [now=Date.now()]
+ * @param {number | null} [tzOffsetMinutes=null]
+ * @param {{ dateOnlyIfFar?: boolean }} [opts]
+ * @returns {string | null}
+ */
+export function formatClockReset(
+  quota,
+  now = Date.now(),
+  tzOffsetMinutes = null,
+  { dateOnlyIfFar = false } = {}
+) {
   if (!quota || quota.disabled) return null;
   let targetMs = quota.resetTime;
   if (targetMs === null || !Number.isFinite(targetMs)) {
@@ -71,10 +138,21 @@ export function formatClockReset(quota, now = Date.now(), tzOffsetMinutes = null
   return `${hh}:${mm}`;
 }
 
+/**
+ * Selects quota buckets strictly matching the active model's billing family.
+ * @param {unknown} rawQuotaMap
+ * @param {string | null} modelId
+ * @param {string | null} modelName
+ */
 function selectActiveQuotas(rawQuotaMap, modelId, modelName) {
   const entries = Object.entries(asObject(rawQuotaMap));
   if (entries.length === 0) return { family: null, fiveHour: null, weekly: null, argonWeekly: null };
 
+  /**
+   * @param {string} key
+   * @param {unknown} raw
+   * @returns {QuotaBucket}
+   */
   const parseBucket = (key, raw) => {
     const value = asObject(raw);
     const fraction = asNonNegNumber(value.remaining_fraction);
@@ -153,6 +231,12 @@ function selectActiveQuotas(rawQuotaMap, modelId, modelName) {
   };
 }
 
+/**
+ * Normalizes a raw `agy` statusLine JSON payload into validated `StatusLineMetrics`.
+ * @param {unknown} payload
+ * @param {{ autoCompactOverride?: unknown, configuredContextWindow?: number | null }} [opts]
+ * @returns {StatusLineMetrics}
+ */
 export function normalizeStatusPayload(
   payload,
   { autoCompactOverride = null, configuredContextWindow = null } = {}
@@ -160,11 +244,12 @@ export function normalizeStatusPayload(
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new Error('Invalid statusLine payload');
   }
+  const root = /** @type {Record<string, any>} */ (payload);
 
-  const context = asObject(payload.context_window);
+  const context = asObject(root.context_window);
   const usage = asObject(context.current_usage);
-  const model = asObject(payload.model);
-  const cost = asObject(payload.cost);
+  const model = asObject(root.model);
+  const cost = asObject(root.cost);
 
   const capacity = asNonNegInt(context.context_window_size) || null;
   const rawUsedPct = asNonNegNumber(context.used_percentage);
@@ -204,8 +289,10 @@ export function normalizeStatusPayload(
   } else if (parsedEnvOverride?.tokens) {
     effectiveLimit = capacity ? Math.min(parsedEnvOverride.tokens, capacity) : parsedEnvOverride.tokens;
     basis = 'compact-env';
-  } else if (Number.isSafeInteger(configuredContextWindow) && configuredContextWindow >= 1000) {
-    effectiveLimit = capacity ? Math.min(configuredContextWindow, capacity) : configuredContextWindow;
+  } else if (Number.isSafeInteger(configuredContextWindow) && /** @type {number} */ (configuredContextWindow) >= 1000) {
+    effectiveLimit = capacity
+      ? Math.min(/** @type {number} */ (configuredContextWindow), capacity)
+      : /** @type {number} */ (configuredContextWindow);
     basis = 'compact-settings';
   } else if (capacity) {
     let heuristic = capacity >= 500_000 ? 512_000 : Math.round(capacity * 0.8);
@@ -219,11 +306,11 @@ export function normalizeStatusPayload(
     usedPercentage = Math.min(100, (usedTokens / effectiveLimit) * 100);
   }
 
-  const state = typeof payload.agent_state === 'string' ? cleanText(payload.agent_state, 24) : null;
+  const state = typeof root.agent_state === 'string' ? cleanText(root.agent_state, 24) : null;
   let cachePct = null;
   if (input !== null && cacheRead !== null) {
     const denom = input + cacheRead + cacheWrite;
-    if (denom > 0 && !(cacheRead === 0 && BUSY_STATES.has(state))) {
+    if (denom > 0 && !(cacheRead === 0 && state !== null && BUSY_STATES.has(state))) {
       cachePct = (cacheRead / denom) * 100;
     }
   }
@@ -232,7 +319,7 @@ export function normalizeStatusPayload(
   const modelName = cleanText(model.display_name || model.id || '', 80) || null;
   const effort = cleanText(model.effort || '', 24).toLowerCase() || null;
 
-  const subagents = Array.isArray(payload.subagents) ? payload.subagents : [];
+  const subagents = Array.isArray(root.subagents) ? root.subagents : [];
   const activeSubagents = subagents.filter(item => {
     const st = String(item?.state || item?.status || '').toLowerCase();
     return !['idle', 'done', 'completed', 'stopped', 'failed', 'error'].includes(st);
@@ -243,12 +330,12 @@ export function normalizeStatusPayload(
     modelId,
     effort,
     state,
-    cycleMode: cleanText(payload.cycle_mode || '', 24) || null,
-    taskCount: asNonNegInt(payload.task_count) ?? 0,
+    cycleMode: cleanText(root.cycle_mode || '', 24) || null,
+    taskCount: asNonNegInt(root.task_count) ?? 0,
     subagentCount: activeSubagents || subagents.length,
     width:
-      Number.isInteger(payload.terminal_width) && payload.terminal_width > 0
-        ? Math.min(500, payload.terminal_width)
+      Number.isInteger(root.terminal_width) && root.terminal_width > 0
+        ? Math.min(500, root.terminal_width)
         : 100,
     context: {
       usedPercentage,
@@ -260,15 +347,17 @@ export function normalizeStatusPayload(
     },
     cachePct,
     costUsd: asNonNegNumber(cost.total_usd),
-    quotas: selectActiveQuotas(payload.quota, modelId, modelName),
+    quotas: selectActiveQuotas(root.quota, modelId, modelName),
   };
 }
 
+/** @param {unknown} value */
 function pctInt(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '--';
   return `${Math.round(value)}%`;
 }
 
+/** @param {number | null} remaining */
 function quotaColor(remaining) {
   if (remaining === null || !Number.isFinite(remaining)) return 39;
   if (remaining < 15) return 31;
@@ -276,6 +365,7 @@ function quotaColor(remaining) {
   return 39;
 }
 
+/** @param {number | null} usedPct */
 function ctxColor(usedPct) {
   if (usedPct === null || !Number.isFinite(usedPct)) return 39;
   if (usedPct >= 90) return 31;
@@ -284,10 +374,23 @@ function ctxColor(usedPct) {
 }
 
 /**
- * Renders the minimalist statusLine inspired by tmp/D215E4507BB7697D3DBBC58C447995B0.png:
- *   ctx 38% of 512K | cache 94% | 5h 72% (resets 18:30) | 7d 94%
+ * Renders the minimalist statusLine:
+ *   `ctx 38% of 512K | cache 94% | 5h 72% (resets 18:30) | 7d 94% (resets 12/03)`
  *
  * Keeps default text calm & muted; applies surgical color accents only on warnings/modes.
+ *
+ * @param {StatusLineMetrics} metrics
+ * @param {{
+ *   language?: string,
+ *   width?: number,
+ *   color?: boolean,
+ *   stacked?: boolean,
+ *   showCache?: boolean,
+ *   showCost?: boolean,
+ *   now?: number,
+ *   tzOffsetMinutes?: number | null,
+ * }} [opts]
+ * @returns {string}
  */
 export function renderMinimalStatusLine(
   metrics,
@@ -302,10 +405,19 @@ export function renderMinimalStatusLine(
     tzOffsetMinutes = null,
   } = {}
 ) {
-  const l = LABELS[language] || LABELS.en;
+  const l = LABELS[/** @type {keyof typeof LABELS} */ (language)] || LABELS.en;
   const maxWidth = Math.max(20, Math.min(500, width || 100));
   const isZh = language === 'zh-CN' || language === 'zh-TW';
 
+  /**
+   * @param {{
+   *   includeReset: boolean,
+   *   includeWeeklyReset: boolean,
+   *   includeCache: boolean,
+   *   includeCost: boolean,
+   *   includeLimit: boolean,
+   * }} cfg
+   */
   const buildRow1 = ({ includeReset, includeWeeklyReset, includeCache, includeCost, includeLimit }) => {
     const segments = [];
 

@@ -1,14 +1,30 @@
+// @ts-check
+
+/**
+ * @typedef {{ text: string, code: number, bold: boolean, dim: boolean }} StyledPart
+ */
+
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
+/**
+ * Splits a string into user-perceived grapheme clusters.
+ * @param {string} text
+ * @returns {string[]}
+ */
 export function graphemeClusters(text) {
   if (!text) return [];
-  return [...segmenter.segment(text)].map(item => item.segment);
+  return [...segmenter.segment(String(text))].map(item => item.segment);
 }
 
+/**
+ * Computes terminal column width (0, 1, or 2 cells) for a single grapheme cluster.
+ * @param {string} cluster
+ * @returns {number}
+ */
 function cellWidth(cluster) {
   if (/^\p{Mark}+$/u.test(cluster)) return 0;
   if (/\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3/u.test(cluster)) return 2;
-  const code = cluster.codePointAt(0);
+  const code = cluster.codePointAt(0) ?? 0;
   if (
     code >= 0x1100 &&
     (code <= 0x115f ||
@@ -28,6 +44,11 @@ function cellWidth(cluster) {
   return 1;
 }
 
+/**
+ * Computes terminal display width of a plain text string.
+ * @param {string} text
+ * @returns {number}
+ */
 export function displayWidth(text) {
   let sum = 0;
   for (const cluster of graphemeClusters(text)) {
@@ -36,6 +57,129 @@ export function displayWidth(text) {
   return sum;
 }
 
+/**
+ * Truncates text to fit within `maxWidth` terminal cells, appending `…` when clipped.
+ * @param {string} text
+ * @param {number} maxWidth
+ * @returns {string}
+ */
+export function truncateDisplay(text, maxWidth) {
+  const str = String(text ?? '');
+  if (maxWidth <= 0) return '';
+  if (displayWidth(str) <= maxWidth) return str;
+  if (maxWidth === 1) return '…';
+
+  let out = '';
+  let used = 0;
+  for (const cluster of graphemeClusters(str)) {
+    const w = cellWidth(cluster);
+    if (used + w > maxWidth - 1) break;
+    out += cluster;
+    used += w;
+  }
+  return out + '…';
+}
+
+/**
+ * Right-pads `text` with spaces to reach `width` terminal display cells.
+ * @param {string} text
+ * @param {number} width
+ * @returns {string}
+ */
+export function padEndDisplay(text, width) {
+  const str = String(text ?? '');
+  const diff = width - displayWidth(str);
+  return diff > 0 ? str + ' '.repeat(diff) : str;
+}
+
+/**
+ * Left-pads `text` with spaces to reach `width` terminal display cells.
+ * @param {string} text
+ * @param {number} width
+ * @returns {string}
+ */
+export function padStartDisplay(text, width) {
+  const str = String(text ?? '');
+  const diff = width - displayWidth(str);
+  return diff > 0 ? ' '.repeat(diff) + str : str;
+}
+
+/**
+ * Wraps plain text across lines without exceeding `maxWidth` display cells,
+ * preferring whitespace boundaries before falling back to grapheme boundaries.
+ * @param {string} text
+ * @param {number} maxWidth
+ * @returns {string[]}
+ */
+export function wrapDisplayText(text, maxWidth) {
+  const str = String(text ?? '').trim();
+  if (!str || maxWidth <= 0) return [];
+  if (displayWidth(str) <= maxWidth) return [str];
+
+  const tokens = str.match(/\S+|\s+/g) || [str];
+  const lines = [];
+  let current = '';
+  let currentWidth = 0;
+
+  for (const token of tokens) {
+    if (/^\s+$/.test(token)) {
+      if (current && currentWidth + 1 <= maxWidth) {
+        current += ' ';
+        currentWidth += 1;
+      }
+      continue;
+    }
+
+    const tokenWidth = displayWidth(token);
+    if (currentWidth === 0 && tokenWidth <= maxWidth) {
+      current = token;
+      currentWidth = tokenWidth;
+      continue;
+    }
+
+    if (currentWidth > 0 && currentWidth + tokenWidth <= maxWidth) {
+      current += token;
+      currentWidth += tokenWidth;
+      continue;
+    }
+
+    if (current.trimEnd()) {
+      lines.push(current.trimEnd());
+      current = '';
+      currentWidth = 0;
+    }
+
+    if (tokenWidth <= maxWidth) {
+      current = token;
+      currentWidth = tokenWidth;
+      continue;
+    }
+
+    for (const cluster of graphemeClusters(token)) {
+      const w = cellWidth(cluster);
+      if (currentWidth + w > maxWidth && current) {
+        lines.push(current);
+        current = cluster;
+        currentWidth = w;
+      } else {
+        current += cluster;
+        currentWidth += w;
+      }
+    }
+  }
+
+  if (current.trimEnd()) {
+    lines.push(current.trimEnd());
+  }
+  return lines;
+}
+
+/**
+ * Strips ANSI escape sequences, control characters, and directional overrides.
+ * @param {unknown} value
+ * @param {number} [limit=120]
+ * @returns {string}
+ */
 export function cleanText(value, limit = 120) {
   if (typeof value !== 'string') return '';
   return value
@@ -47,18 +191,39 @@ export function cleanText(value, limit = 120) {
     .slice(0, limit);
 }
 
+/**
+ * @param {string} text
+ * @param {number} [code=39]
+ * @param {boolean} [bold=false]
+ * @param {boolean} [dim=false]
+ * @returns {StyledPart}
+ */
 export function part(text, code = 39, bold = false, dim = false) {
   return { text, code, bold, dim };
 }
 
+/**
+ * @param {string} text
+ * @returns {StyledPart}
+ */
 export function subtle(text) {
   return part(text, 39, false, true);
 }
 
+/**
+ * @param {StyledPart[]} parts
+ * @returns {string}
+ */
 export function plainText(parts) {
   return parts.map(item => item.text).join('');
 }
 
+/**
+ * Truncates a sequence of styled parts to `maxWidth` terminal columns.
+ * @param {StyledPart[]} parts
+ * @param {number} maxWidth
+ * @returns {StyledPart[]}
+ */
 export function fitParts(parts, maxWidth) {
   if (displayWidth(plainText(parts)) <= maxWidth) return parts;
   if (maxWidth <= 0) return [];
@@ -80,6 +245,13 @@ export function fitParts(parts, maxWidth) {
   return result;
 }
 
+/**
+ * Renders styled parts within `maxWidth`, optionally emitting SGR ANSI color sequences.
+ * @param {StyledPart[]} parts
+ * @param {number} maxWidth
+ * @param {boolean} [color=true]
+ * @returns {string}
+ */
 export function paintParts(parts, maxWidth, color = true) {
   const fitted = fitParts(parts, maxWidth);
   if (!color) return plainText(fitted);
@@ -91,19 +263,12 @@ export function paintParts(parts, maxWidth, color = true) {
     .join('');
 }
 
-export function makeBar(value, code, size) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return [];
-  const filled = Math.min(size, Math.max(0, Math.round((value / 100) * size)));
-  const parts = [];
-  if (filled > 0) parts.push(part('█'.repeat(filled), code));
-  if (size - filled > 0) parts.push(subtle('░'.repeat(size - filled)));
-  return parts;
-}
-
-export function isLightBackground(env = process.env) {
-  return /(?:^|;)(?:7|15)$/.test(env.COLORFGBG || '');
-}
-
+/**
+ * Honors `--no-color`, `NO_COLOR`, and `TERM=dumb`.
+ * @param {boolean} [noColorFlag=false]
+ * @param {NodeJS.ProcessEnv} [env=process.env]
+ * @returns {boolean}
+ */
 export function shouldUseColor(noColorFlag = false, env = process.env) {
-  return !noColorFlag && !Object.hasOwn(env, 'NO_COLOR') && env.TERM !== 'dumb';
+  return !noColorFlag && !Object.hasOwn(env || {}, 'NO_COLOR') && env?.TERM !== 'dumb';
 }

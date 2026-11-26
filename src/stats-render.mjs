@@ -1,4 +1,13 @@
-import { displayWidth, paintParts, part, subtle } from './ansi.mjs';
+// @ts-check
+import {
+  padEndDisplay,
+  padStartDisplay,
+  paintParts,
+  part,
+  subtle,
+  truncateDisplay,
+  wrapDisplayText,
+} from './ansi.mjs';
 import { compactNumber, formatPercentage, formatUsd } from './i18n.mjs';
 
 const STATS_LABELS = {
@@ -79,7 +88,7 @@ const STATS_LABELS = {
     shareCol: '占比',
     noData: '当前筛选区间暂无记录。',
     footerNote:
-      '说明：估算花销按公开 API 单价（$/1M tok）折算，可在 dashboard-cli-data/pricing.json 自定义单价；订阅制账号（Pro/Enterprise）实际按配额计费。',
+      '说明：估算花销按公开 API 单价（$/1M tok）折算，可在数据目录的 pricing.json 自定义单价；订阅制账号（Pro/Enterprise）实际按配额计费。',
     daysShort: ['周一', '周二', '周三', '周四', '周五', '周六', '周日'],
   },
   'zh-TW': {
@@ -119,28 +128,25 @@ const STATS_LABELS = {
     shareCol: '佔比',
     noData: '目前篩選區間暫無記錄。',
     footerNote:
-      '說明：估算花費依公開 API 單價（$/1M tok）折算，可在 dashboard-cli-data/pricing.json 自訂單價；訂閱制帳號實際依配額計費。',
+      '說明：估算花費依公開 API 單價（$/1M tok）折算，可在資料目錄的 pricing.json 自訂單價；訂閱制帳號實際依配額計費。',
     daysShort: ['週一', '週二', '週三', '週四', '週五', '週六', '週日'],
   },
 };
 
-function padEndDisplay(text, width) {
-  const str = String(text ?? '');
-  const diff = width - displayWidth(str);
-  return diff > 0 ? str + ' '.repeat(diff) : str;
-}
-
-function padStartDisplay(text, width) {
-  const str = String(text ?? '');
-  const diff = width - displayWidth(str);
-  return diff > 0 ? ' '.repeat(diff) + str : str;
-}
-
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
 function fmtMoney(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '--';
   return formatUsd(value) || '$0.00';
 }
 
+/**
+ * @param {number} ratio
+ * @param {number} maxChars
+ * @param {number} colorCode
+ */
 function renderMiniBar(ratio, maxChars, colorCode) {
   const clamped = Math.max(0, Math.min(1, ratio || 0));
   const filled = clamped > 0 ? Math.max(1, Math.round(clamped * maxChars)) : 0;
@@ -150,13 +156,22 @@ function renderMiniBar(ratio, maxChars, colorCode) {
   return parts;
 }
 
+/**
+ * @param {Array<{ date: string, dayOfWeek: number, totalTokens: number }>} days
+ * @param {typeof STATS_LABELS['en']} l
+ * @param {number} width
+ * @param {boolean} color
+ * @returns {string[]}
+ */
 function renderHeatmap(days, l, width, color) {
-  const maxVal = days.reduce((m, d) => Math.max(m, d.totalTokens), 0);
+  const safeDays = Array.isArray(days) ? days : [];
+  const maxVal = safeDays.reduce((m, d) => Math.max(m, d?.totalTokens || 0), 0);
   // Align columns Monday (row 0) through Sunday (row 6).
-  const firstDow = days[0]?.dayOfWeek ?? 1;
+  const firstDow = safeDays[0]?.dayOfWeek ?? 1;
   const monOffset = (firstDow + 6) % 7; // 0 for Mon, 6 for Sun
-  const padded = [...Array(monOffset).fill(null), ...days];
+  const padded = [...Array(monOffset).fill(null), ...safeDays];
   const weeks = Math.ceil(padded.length / 7);
+  /** @type {Array<Array<{ totalTokens: number } | null>>} */
   const grid = Array.from({ length: 7 }, () => []);
 
   for (let w = 0; w < weeks; w++) {
@@ -165,6 +180,7 @@ function renderHeatmap(days, l, width, color) {
     }
   }
 
+  /** @param {{ totalTokens: number } | null} cell */
   const levelCell = cell => {
     if (!cell) return part('  ', 39);
     if (cell.totalTokens <= 0 || maxVal <= 0) return subtle('· ');
@@ -189,7 +205,6 @@ function renderHeatmap(days, l, width, color) {
   lines.push(paintParts(header, width, color));
 
   for (let r = 0; r < 7; r++) {
-    // Show Mon / Wed / Fri / Sun labels for clean readability.
     const label = [0, 2, 4, 6].includes(r) ? padEndDisplay(l.daysShort[r], 5) : '     ';
     const rowParts = [subtle(label + ' '), ...grid[r].map(levelCell)];
     lines.push(paintParts(rowParts, width, color));
@@ -197,20 +212,41 @@ function renderHeatmap(days, l, width, color) {
   return lines;
 }
 
+const EMPTY_BUCKET = Object.freeze({
+  requests: 0,
+  conversations: 0,
+  inputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  outputTokens: 0,
+  totalTokens: 0,
+  cacheRate: null,
+  estimatedUsd: 0,
+  cacheSavedUsd: 0,
+  pricedRequests: 0,
+});
+
+/**
+ * Renders a normalized `UsageReport` as an ANSI/plain terminal dashboard.
+ * @param {import('./usage-aggregator.mjs').UsageReport} report
+ * @param {{ language?: string, width?: number, color?: boolean }} [opts]
+ * @returns {string}
+ */
 export function renderUsageReport(
   report,
   { language = 'en', width = 110, color = true } = {}
 ) {
-  const l = STATS_LABELS[language] || STATS_LABELS.en;
-  const maxWidth = Math.max(60, Math.min(200, width || 110));
+  const l = STATS_LABELS[/** @type {keyof typeof STATS_LABELS} */ (language)] || STATS_LABELS.en;
+  const maxWidth = Math.max(60, Math.min(200, Number.isFinite(width) && width > 0 ? width : 110));
   const lines = [];
   const rule = '─'.repeat(Math.min(maxWidth, 96));
 
-  // Header
+  const rangeFrom = report?.range?.from ?? 'all';
+  const rangeTo = report?.range?.to ?? '--';
   const subtitle = [
-    `${report.range.from} → ${report.range.to}`,
-    report.timezone,
-    report.modelFilter ? `model~${report.modelFilter}` : null,
+    `${rangeFrom} → ${rangeTo}`,
+    report?.timezone || 'UTC',
+    report?.modelFilter ? `model~${report.modelFilter}` : null,
   ]
     .filter(Boolean)
     .join(' · ');
@@ -233,11 +269,13 @@ export function renderUsageReport(
   ];
   lines.push(paintParts(overviewHeader, maxWidth, color));
 
+  const overview = report?.overview || /** @type {any} */ ({});
+  /** @type {Array<[string, import('./usage-aggregator.mjs').AggregatedBucket]>} */
   const overviewRows = [
-    [l.today, report.overview.today],
-    [l.last7d, report.overview.last7Days],
-    [l.thisMonth, report.overview.thisMonth],
-    [l.allTime, report.overview.allTime],
+    [l.today, overview.today || EMPTY_BUCKET],
+    [l.last7d, overview.last7Days || EMPTY_BUCKET],
+    [l.thisMonth, overview.thisMonth || EMPTY_BUCKET],
+    [l.allTime, overview.allTime || EMPTY_BUCKET],
   ];
 
   for (const [label, bucket] of overviewRows) {
@@ -247,15 +285,19 @@ export function renderUsageReport(
       part(padStartDisplay(compactNumber(bucket.cacheReadTokens), 8), 35),
       part(padStartDisplay(compactNumber(bucket.inputTokens), 9), 39),
       part(padStartDisplay(compactNumber(bucket.outputTokens), 7), 39),
-      part(padStartDisplay(formatPercentage(bucket.cacheRate), 7), bucket.cacheRate !== null ? 35 : 39, true),
-      subtle(padStartDisplay(String(bucket.requests), 5)),
+      part(
+        padStartDisplay(formatPercentage(bucket.cacheRate), 7),
+        bucket.cacheRate !== null ? 35 : 39,
+        true
+      ),
+      subtle(padStartDisplay(String(bucket.requests ?? 0), 5)),
       part(padStartDisplay(fmtMoney(bucket.estimatedUsd), 9), 32, true),
       part(padStartDisplay(fmtMoney(bucket.cacheSavedUsd), 9), 33),
     ];
     lines.push(paintParts(row, maxWidth, color));
   }
 
-  if (report.cliReportedCost && report.cliReportedCost.totalUsd > 0) {
+  if (report?.cliReportedCost && report.cliReportedCost.totalUsd > 0) {
     lines.push(
       paintParts(
         [
@@ -272,19 +314,20 @@ export function renderUsageReport(
   lines.push('');
 
   // Section 2: Activity Heatmap
-  lines.push(...renderHeatmap(report.heatmap || [], l, maxWidth, color));
+  lines.push(...renderHeatmap(report?.heatmap || [], l, maxWidth, color));
   lines.push('');
 
   // Section 3: Breakdown by Date / Week / Month
   const periodTitle =
-    report.groupBy === 'month' ? l.byMonth : report.groupBy === 'week' ? l.byWeek : l.byDay;
+    report?.groupBy === 'month' ? l.byMonth : report?.groupBy === 'week' ? l.byWeek : l.byDay;
   lines.push(paintParts([part(periodTitle, 36, true)], maxWidth, color));
 
-  if (!report.periods || report.periods.length === 0) {
+  const periods = Array.isArray(report?.periods) ? report.periods : [];
+  if (periods.length === 0) {
     lines.push(paintParts([subtle(l.noData)], maxWidth, color));
   } else {
     const showBar = maxWidth >= 88;
-    const maxPeriodTokens = report.periods.reduce((m, p) => Math.max(m, p.totalTokens), 0);
+    const maxPeriodTokens = periods.reduce((m, p) => Math.max(m, p.totalTokens || 0), 0);
     const pHeader = [
       subtle(padEndDisplay(l.periodCol, 11)),
       subtle(padStartDisplay(l.reqCol, 5)),
@@ -298,16 +341,19 @@ export function renderUsageReport(
     ];
     lines.push(paintParts(pHeader, maxWidth, color));
 
-    for (const row of report.periods) {
+    for (const row of periods) {
       const ratio = maxPeriodTokens > 0 ? row.totalTokens / maxPeriodTokens : 0;
       const parts = [
-        part(padEndDisplay(row.period, 11), 39, true),
-        subtle(padStartDisplay(String(row.requests), 5)),
+        part(padEndDisplay(truncateDisplay(row.period, 10), 11), 39, true),
+        subtle(padStartDisplay(String(row.requests ?? 0), 5)),
         part(padStartDisplay(compactNumber(row.totalTokens), 8), 36, true),
         part(padStartDisplay(compactNumber(row.cacheReadTokens), 8), 35),
         part(padStartDisplay(compactNumber(row.inputTokens), 9), 39),
         part(padStartDisplay(compactNumber(row.outputTokens), 7), 39),
-        part(padStartDisplay(formatPercentage(row.cacheRate), 7), row.cacheRate !== null ? 35 : 39),
+        part(
+          padStartDisplay(formatPercentage(row.cacheRate), 7),
+          row.cacheRate !== null ? 35 : 39
+        ),
         part(padStartDisplay(fmtMoney(row.estimatedUsd), 9), 32),
         part(padStartDisplay(fmtMoney(row.cacheSavedUsd), 9), 33),
       ];
@@ -322,10 +368,11 @@ export function renderUsageReport(
 
   // Section 4: Breakdown by Model
   lines.push(paintParts([part(l.byModel, 36, true)], maxWidth, color));
-  if (!report.models || report.models.length === 0) {
+  const models = Array.isArray(report?.models) ? report.models : [];
+  if (models.length === 0) {
     lines.push(paintParts([subtle(l.noData)], maxWidth, color));
   } else {
-    const grandTotal = report.overview.selectedRange.totalTokens || 1;
+    const grandTotal = overview.selectedRange?.totalTokens || 1;
     const mHeader = [
       subtle(padEndDisplay(l.modelCol, 22)),
       subtle(padStartDisplay(l.reqCol, 5)),
@@ -338,11 +385,11 @@ export function renderUsageReport(
     ];
     lines.push(paintParts(mHeader, maxWidth, color));
 
-    for (const m of report.models) {
+    for (const m of models) {
       const sharePct = (m.totalTokens / grandTotal) * 100;
       const mParts = [
-        part(padEndDisplay(m.model.slice(0, 21), 22), 39, true),
-        subtle(padStartDisplay(String(m.requests), 5)),
+        part(padEndDisplay(truncateDisplay(m.model, 21), 22), 39, true),
+        subtle(padStartDisplay(String(m.requests ?? 0), 5)),
         part(padStartDisplay(compactNumber(m.totalTokens), 8), 36, true),
         subtle(padStartDisplay(formatPercentage(sharePct), 7)),
         part(padStartDisplay(compactNumber(m.cacheReadTokens), 8), 35),
@@ -355,31 +402,27 @@ export function renderUsageReport(
   }
 
   lines.push(paintParts([subtle(rule)], maxWidth, color));
-  // Wrap footer note cleanly across lines instead of clipping at terminal width.
-  const noteChunks = [];
-  let current = '';
-  for (const ch of l.footerNote) {
-    if (displayWidth(current + ch) > maxWidth) {
-      noteChunks.push(current);
-      current = ch;
-    } else {
-      current += ch;
-    }
-  }
-  if (current) noteChunks.push(current);
-  for (const chunk of noteChunks) {
+  for (const chunk of wrapDisplayText(l.footerNote, maxWidth)) {
     lines.push(paintParts([subtle(chunk)], maxWidth, color));
   }
 
   return lines.join('\n');
 }
 
+/**
+ * Renders a normalized `UsageReport` as GitHub-Flavored Markdown tables + text heatmap.
+ * @param {import('./usage-aggregator.mjs').UsageReport} report
+ * @param {{ language?: string }} [opts]
+ * @returns {string}
+ */
 export function renderUsageReportMarkdown(report, { language = 'en' } = {}) {
-  const l = STATS_LABELS[language] || STATS_LABELS.en;
+  const l = STATS_LABELS[/** @type {keyof typeof STATS_LABELS} */ (language)] || STATS_LABELS.en;
+  const rangeFrom = report?.range?.from ?? 'all';
+  const rangeTo = report?.range?.to ?? '--';
   const subtitle = [
-    `${report.range.from} → ${report.range.to}`,
-    report.timezone,
-    report.modelFilter ? `model~${report.modelFilter}` : null,
+    `${rangeFrom} → ${rangeTo}`,
+    report?.timezone || 'UTC',
+    report?.modelFilter ? `model~${report.modelFilter}` : null,
   ]
     .filter(Boolean)
     .join(' · ');
@@ -389,23 +432,25 @@ export function renderUsageReportMarkdown(report, { language = 'en' } = {}) {
   out.push(`> ${subtitle}`);
   out.push('');
 
-  // Overview table
+  const overview = report?.overview || /** @type {any} */ ({});
   out.push(`#### ${l.overview}`);
   out.push(
     `| | ${l.totalTokens} | ${l.cacheRead} | ${l.uncachedIn} | ${l.output} | ${l.cacheHit} | ${l.requests} | ${l.estCost} | ${l.cacheSaved} |`
   );
   out.push('| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |');
-  for (const [label, b] of [
-    [l.today, report.overview.today],
-    [l.last7d, report.overview.last7Days],
-    [l.thisMonth, report.overview.thisMonth],
-    [l.allTime, report.overview.allTime],
-  ]) {
+  /** @type {Array<[string, import('./usage-aggregator.mjs').AggregatedBucket]>} */
+  const overviewRows = [
+    [l.today, overview.today || EMPTY_BUCKET],
+    [l.last7d, overview.last7Days || EMPTY_BUCKET],
+    [l.thisMonth, overview.thisMonth || EMPTY_BUCKET],
+    [l.allTime, overview.allTime || EMPTY_BUCKET],
+  ];
+  for (const [label, b] of overviewRows) {
     out.push(
       `| **${label}** | **${compactNumber(b.totalTokens)}** | ${compactNumber(b.cacheReadTokens)} | ${compactNumber(b.inputTokens)} | ${compactNumber(b.outputTokens)} | ${formatPercentage(b.cacheRate)} | ${b.requests} | **${fmtMoney(b.estimatedUsd)}** | ${fmtMoney(b.cacheSavedUsd)} |`
     );
   }
-  if (report.cliReportedCost && report.cliReportedCost.totalUsd > 0) {
+  if (report?.cliReportedCost && report.cliReportedCost.totalUsd > 0) {
     out.push('');
     out.push(
       `> ${l.cliCost}: **${fmtMoney(report.cliReportedCost.totalUsd)}** (${report.cliReportedCost.conversations} conv)`
@@ -413,8 +458,7 @@ export function renderUsageReportMarkdown(report, { language = 'en' } = {}) {
   }
   out.push('');
 
-  // Heatmap in fenced code block (plain text, no ANSI)
-  const heatmapLines = renderHeatmap(report.heatmap || [], l, 100, false);
+  const heatmapLines = renderHeatmap(report?.heatmap || [], l, 100, false);
   out.push(`#### ${l.heatmapTitle}`);
   out.push('```text');
   out.push(...heatmapLines.slice(1));
@@ -422,18 +466,18 @@ export function renderUsageReportMarkdown(report, { language = 'en' } = {}) {
   out.push('```');
   out.push('');
 
-  // By Date / Week / Month table
   const periodTitle =
-    report.groupBy === 'month' ? l.byMonth : report.groupBy === 'week' ? l.byWeek : l.byDay;
+    report?.groupBy === 'month' ? l.byMonth : report?.groupBy === 'week' ? l.byWeek : l.byDay;
   out.push(`#### ${periodTitle}`);
-  if (!report.periods || report.periods.length === 0) {
+  const periods = Array.isArray(report?.periods) ? report.periods : [];
+  if (periods.length === 0) {
     out.push(`_${l.noData}_`);
   } else {
     out.push(
       `| ${l.periodCol} | ${l.reqCol} | ${l.totalCol} | ${l.cacheCol} | ${l.inCol} | ${l.outCol} | ${l.hitCol} | ${l.costCol} | ${l.savedCol} |`
     );
     out.push('| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |');
-    for (const row of report.periods) {
+    for (const row of periods) {
       out.push(
         `| ${row.period} | ${row.requests} | **${compactNumber(row.totalTokens)}** | ${compactNumber(row.cacheReadTokens)} | ${compactNumber(row.inputTokens)} | ${compactNumber(row.outputTokens)} | ${formatPercentage(row.cacheRate)} | ${fmtMoney(row.estimatedUsd)} | ${fmtMoney(row.cacheSavedUsd)} |`
       );
@@ -441,20 +485,21 @@ export function renderUsageReportMarkdown(report, { language = 'en' } = {}) {
   }
   out.push('');
 
-  // By Model table
   out.push(`#### ${l.byModel}`);
-  if (!report.models || report.models.length === 0) {
+  const models = Array.isArray(report?.models) ? report.models : [];
+  if (models.length === 0) {
     out.push(`_${l.noData}_`);
   } else {
-    const grandTotal = report.overview.selectedRange.totalTokens || 1;
+    const grandTotal = overview.selectedRange?.totalTokens || 1;
     out.push(
       `| ${l.modelCol} | ${l.reqCol} | ${l.totalCol} | ${l.shareCol} | ${l.cacheCol} | ${l.hitCol} | ${l.costCol} | ${l.savedCol} |`
     );
     out.push('| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |');
-    for (const m of report.models) {
+    for (const m of models) {
       const sharePct = (m.totalTokens / grandTotal) * 100;
+      const safeModel = String(m.model || 'unknown').replace(/`/g, '');
       out.push(
-        `| \`${m.model}\` | ${m.requests} | **${compactNumber(m.totalTokens)}** | ${formatPercentage(sharePct)} | ${compactNumber(m.cacheReadTokens)} | ${formatPercentage(m.cacheRate)} | **${fmtMoney(m.estimatedUsd)}** | ${fmtMoney(m.cacheSavedUsd)} |`
+        `| \`${safeModel}\` | ${m.requests} | **${compactNumber(m.totalTokens)}** | ${formatPercentage(sharePct)} | ${compactNumber(m.cacheReadTokens)} | ${formatPercentage(m.cacheRate)} | **${fmtMoney(m.estimatedUsd)}** | ${fmtMoney(m.cacheSavedUsd)} |`
       );
     }
   }

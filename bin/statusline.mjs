@@ -1,8 +1,14 @@
 #!/usr/bin/env node
+// @ts-check
 import { shouldUseColor } from '../src/ansi.mjs';
-import { MAX_STDIN_BYTES, SUPPORTED_LANGUAGES } from '../src/constants.mjs';
+import { parseLanguageStrict, resolveLanguage } from '../src/i18n.mjs';
 import { normalizeStatusPayload, renderMinimalStatusLine } from '../src/statusline-core.mjs';
-import { loadPreferences, readCliContextOverrides, resolveDataDir } from '../src/store.mjs';
+import {
+  loadPreferences,
+  readCliContextOverrides,
+  readStdinJson,
+  resolveDataDir,
+} from '../src/store.mjs';
 
 const HELP = `Antigravity CLI Minimal StatusLine (Node.js 20+)
 Reads official Antigravity CLI statusLine JSON from stdin and renders a clean minimalist bar.
@@ -11,7 +17,7 @@ Options:
   --preview                 Render synthetic preview (no state written)
   --preview-argon           Render synthetic Argon preview
   --no-stack                Include second metadata row (when not stacked with built-in bar)
-  --language en|zh-CN|zh-TW Override language preference
+  --language en|zh-CN|zh-TW Override language preference (aliases: zh, tw)
   --width 20..500           Override terminal width
   --data-dir <path>         Override preferences directory
   --no-color                Disable ANSI colors
@@ -19,7 +25,9 @@ Options:
   --help                    Show this help
 `;
 
+/** @param {string[]} argv */
 function parseArgs(argv) {
+  /** @type {Record<string, any>} */
   const opts = { stacked: true };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -31,11 +39,12 @@ function parseArgs(argv) {
     else if (arg === '--help' || arg === '-h') opts.help = true;
     else if (arg === '--language') {
       const value = argv[++i];
-      if (!SUPPORTED_LANGUAGES.includes(value)) throw new Error(`Invalid language: ${value}`);
-      opts.language = value;
+      opts.language = parseLanguageStrict(value);
     } else if (arg === '--width') {
       const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 20 || value > 500) throw new Error(`Invalid width: ${value}`);
+      if (!Number.isInteger(value) || value < 20 || value > 500) {
+        throw new Error(`Invalid width: ${value}`);
+      }
       opts.width = value;
     } else if (arg === '--data-dir') {
       const value = argv[++i];
@@ -48,7 +57,13 @@ function parseArgs(argv) {
   return opts;
 }
 
+/**
+ * Builds synthetic `agy` statusLine payload for `--preview` / `--preview-argon`.
+ * @param {boolean} [argon=false]
+ * @param {number} [now=Date.now()]
+ */
 export function buildSyntheticStatusPayload(argon = false, now = Date.now()) {
+  /** @type {Record<string, any>} */
   const payload = {
     version: '1.5.11',
     model: {
@@ -109,26 +124,31 @@ export function buildSyntheticStatusPayload(argon = false, now = Date.now()) {
   return payload;
 }
 
-async function readStdinJson() {
-  let size = 0;
-  const chunks = [];
-  for await (const chunk of process.stdin) {
-    size += chunk.length;
-    if (size > MAX_STDIN_BYTES) throw new Error('Input exceeds maximum size');
-    chunks.push(chunk);
-  }
-  const text = Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, '');
-  return JSON.parse(text);
-}
-
+/**
+ * Normalizes and renders a statusLine payload.
+ * @param {any} payload
+ * @param {{
+ *   synthetic?: boolean,
+ *   stacked?: boolean,
+ *   language?: string,
+ *   width?: number,
+ *   noColor?: boolean,
+ *   json?: boolean,
+ *   dataDir?: string,
+ *   env?: NodeJS.ProcessEnv,
+ * }} [opts]
+ * @param {number} [now=Date.now()]
+ * @returns {string}
+ */
 export function runStatusLine(payload, opts = {}, now = Date.now()) {
-  const dataDir = resolveDataDir(opts.dataDir);
+  const env = opts.env || process.env;
+  const dataDir = resolveDataDir(opts.dataDir || null, env);
   const prefs = loadPreferences(dataDir);
-  const language = opts.language || prefs.language || 'en';
+  const language = resolveLanguage(opts.language || prefs.language);
   const projectDir = payload?.workspace?.project_dir || payload?.cwd || null;
   const overrides = opts.synthetic
     ? { autoCompactOverrideRaw: null, configuredContextWindow: null }
-    : readCliContextOverrides({ projectDir });
+    : readCliContextOverrides({ env, projectDir });
 
   const metrics = normalizeStatusPayload(payload, {
     autoCompactOverride: overrides.autoCompactOverrideRaw,
@@ -140,7 +160,7 @@ export function runStatusLine(payload, opts = {}, now = Date.now()) {
   return renderMinimalStatusLine(metrics, {
     language,
     width: opts.width || metrics.width,
-    color: shouldUseColor(Boolean(opts.noColor)),
+    color: shouldUseColor(Boolean(opts.noColor), env),
     stacked: opts.stacked !== false,
     showCache: prefs.showCache,
     showCost: prefs.showCost,
@@ -158,7 +178,7 @@ async function main() {
     const payload =
       opts.preview || opts.previewArgon
         ? buildSyntheticStatusPayload(Boolean(opts.previewArgon))
-        : await readStdinJson();
+        : await readStdinJson({ allowEmpty: false });
     const output = runStatusLine(payload, {
       ...opts,
       synthetic: Boolean(opts.preview || opts.previewArgon),

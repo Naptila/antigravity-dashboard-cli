@@ -1,15 +1,23 @@
+// @ts-check
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { SUPPORTED_LANGUAGES } from './constants.mjs';
-import { resolveDataDir, savePreferences, writeJsonAtomic } from './store.mjs';
+import {
+  INSTALL_NAME,
+  INSTALL_SCHEMA_VERSION,
+  STATUSLINE_RUNTIME_FILES,
+  SUPPORTED_LANGUAGES,
+} from './constants.mjs';
+import { resolveCliBaseDir, resolveDataDir, savePreferences, writeJsonAtomic } from './store.mjs';
 
-const INSTALL_NAME = 'antigravity-dashboard-cli';
-const INSTALL_SCHEMA_VERSION = 1;
-
-export function getCliPaths(homeDir = os.homedir()) {
-  const base = path.join(homeDir, '.gemini', 'antigravity-cli');
+/**
+ * Resolves installation, backup, settings, and lockfile paths for the CLI runtime.
+ * @param {string} [homeDir=os.homedir()]
+ * @param {NodeJS.ProcessEnv} [env=process.env]
+ */
+export function getCliPaths(homeDir = os.homedir(), env = process.env) {
+  const base = resolveCliBaseDir({ homeDir, env });
   return {
     base,
     settingsFile: path.join(base, 'settings.json'),
@@ -19,12 +27,13 @@ export function getCliPaths(homeDir = os.homedir()) {
   };
 }
 
+/** @param {string} targetPath */
 function assertNotSymlinkOrJunction(targetPath) {
   let lstat;
   try {
     lstat = fs.lstatSync(targetPath);
   } catch (err) {
-    if (err && err.code === 'ENOENT') return;
+    if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return;
     throw err;
   }
   if (lstat.isSymbolicLink()) {
@@ -37,15 +46,37 @@ function assertNotSymlinkOrJunction(targetPath) {
   }
 }
 
-function readSettingsObject(filePath) {
-  if (!fs.existsSync(filePath)) return {};
-  const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, ''));
+/**
+ * Parses a JSON settings `Buffer` (or `null` if file does not exist) into a plain object.
+ * @param {Buffer | null} rawBytes
+ * @param {string} label
+ * @returns {Record<string, any>}
+ */
+function parseSettingsBuffer(rawBytes, label = 'CLI settings.json') {
+  if (!rawBytes) return {};
+  const parsed = JSON.parse(rawBytes.toString('utf8').replace(/^\uFEFF/, ''));
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('CLI settings.json must be a JSON object.');
+    throw new Error(`${label} must be a JSON object.`);
   }
   return parsed;
 }
 
+/** @param {string} filePath */
+function readSettingsBytesAndObject(filePath, label = 'CLI settings.json') {
+  if (!fs.existsSync(filePath)) {
+    return { bytes: null, data: /** @type {Record<string, any>} */ ({}) };
+  }
+  const bytes = fs.readFileSync(filePath);
+  return { bytes, data: parseSettingsBuffer(bytes, label) };
+}
+
+/**
+ * @template T
+ * @param {string} baseDir
+ * @param {string} lockFile
+ * @param {() => T} fn
+ * @returns {T}
+ */
 function withLifecycleLock(baseDir, lockFile, fn) {
   assertNotSymlinkOrJunction(baseDir);
   fs.mkdirSync(baseDir, { recursive: true });
@@ -53,7 +84,7 @@ function withLifecycleLock(baseDir, lockFile, fn) {
   try {
     fd = fs.openSync(lockFile, 'wx', 0o600);
   } catch (err) {
-    if (err && err.code === 'EEXIST') {
+    if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'EEXIST') {
       throw new Error(
         `Another lifecycle operation is active (lock exists: ${lockFile}). Remove it manually if a previous run crashed.`
       );
@@ -72,10 +103,18 @@ function withLifecycleLock(baseDir, lockFile, fn) {
   }
 }
 
+/** @param {string} value */
 function shellQuotePosix(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * Builds the OS-appropriate `statusLine` shell command string.
+ * @param {string} nodePath
+ * @param {string} scriptPath
+ * @param {{ stacked?: boolean, noColor?: boolean, platform?: string }} [opts]
+ * @returns {string}
+ */
 export function buildStatusLineCommand(
   nodePath,
   scriptPath,
@@ -91,7 +130,7 @@ export function buildStatusLineCommand(
         throw new Error('Node or script path contains invalid control characters.');
       }
     }
-    const psQuote = value => `'${String(value).replace(/'/g, "''")}'`;
+    const psQuote = (/** @type {string} */ value) => `'${String(value).replace(/'/g, "''")}'`;
     const invocation = [psQuote(nodePath), psQuote(scriptPath), ...args].join(' ');
     const psScript =
       '[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); ' +
@@ -104,6 +143,11 @@ export function buildStatusLineCommand(
   return [shellQuotePosix(nodePath), shellQuotePosix(scriptPath), ...args].join(' ');
 }
 
+/**
+ * Verifies that the target Node.js executable is version 20 or newer.
+ * @param {string | null} [explicitNode=null]
+ * @returns {string}
+ */
 export function resolveNodeExecutable(explicitNode = null) {
   const candidate = explicitNode || process.execPath;
   const output = execFileSync(candidate, ['--version'], { encoding: 'utf8' }).trim();
@@ -114,6 +158,11 @@ export function resolveNodeExecutable(explicitNode = null) {
   return fs.realpathSync(candidate);
 }
 
+/**
+ * @param {any} current
+ * @param {any} backupState
+ * @returns {boolean}
+ */
 function ownsStatusLine(current, backupState) {
   if (!backupState || backupState.name !== INSTALL_NAME || backupState.schema !== INSTALL_SCHEMA_VERSION) {
     return false;
@@ -129,23 +178,18 @@ function ownsStatusLine(current, backupState) {
   return knownCommands.includes(current.command);
 }
 
+/**
+ * @param {string} sourceRoot
+ * @param {string} runtimeDir
+ */
 function copyRuntimeFiles(sourceRoot, runtimeDir) {
-  const filesToCopy = [
-    'package.json',
-    'bin/statusline.mjs',
-    'src/constants.mjs',
-    'src/i18n.mjs',
-    'src/ansi.mjs',
-    'src/store.mjs',
-    'src/statusline-core.mjs',
-  ];
   fs.mkdirSync(runtimeDir, { recursive: true });
   writeJsonAtomic(path.join(runtimeDir, 'installation.json'), {
     name: INSTALL_NAME,
     schema: INSTALL_SCHEMA_VERSION,
     installedAt: new Date().toISOString(),
   });
-  for (const rel of filesToCopy) {
+  for (const rel of STATUSLINE_RUNTIME_FILES) {
     const src = path.join(sourceRoot, rel);
     const dst = path.join(runtimeDir, rel);
     fs.mkdirSync(path.dirname(dst), { recursive: true });
@@ -153,15 +197,32 @@ function copyRuntimeFiles(sourceRoot, runtimeDir) {
   }
 }
 
+/** @param {string} runtimeDir */
 function verifyRuntimeRoot(runtimeDir) {
   assertNotSymlinkOrJunction(runtimeDir);
   if (!fs.existsSync(runtimeDir)) return;
-  const marker = readSettingsObject(path.join(runtimeDir, 'installation.json'));
+  const { data: marker } = readSettingsBytesAndObject(
+    path.join(runtimeDir, 'installation.json'),
+    'installation.json'
+  );
   if (marker.name !== INSTALL_NAME) {
     throw new Error(`Destination ${runtimeDir} is not owned by ${INSTALL_NAME}; refusing to overwrite.`);
   }
 }
 
+/**
+ * Installs the standalone `statusLine` runtime and updates `settings.json` atomically.
+ * @param {{
+ *   sourceRoot: string,
+ *   homeDir?: string,
+ *   dataDir?: string | null,
+ *   nodePath?: string | null,
+ *   language?: string | null,
+ *   stacked?: boolean,
+ *   noColor?: boolean,
+ *   platform?: string,
+ * }} opts
+ */
 export function installStatusLine({
   sourceRoot,
   homeDir = os.homedir(),
@@ -171,8 +232,11 @@ export function installStatusLine({
   stacked = true,
   noColor = false,
   platform = process.platform,
-} = {}) {
-  if (language && !SUPPORTED_LANGUAGES.includes(language)) {
+} = /** @type {any} */ ({})) {
+  if (!sourceRoot) {
+    throw new Error('sourceRoot is required for installStatusLine.');
+  }
+  if (language && !SUPPORTED_LANGUAGES.includes(/** @type {any} */ (language))) {
     throw new Error(`Invalid language: ${language}`);
   }
   const resolvedNode = resolveNodeExecutable(nodePath);
@@ -189,9 +253,8 @@ export function installStatusLine({
     assertNotSymlinkOrJunction(paths.backupFile);
     verifyRuntimeRoot(paths.runtimeDir);
 
-    const beforeBytes = fs.existsSync(paths.settingsFile) ? fs.readFileSync(paths.settingsFile) : null;
-    const settings = readSettingsObject(paths.settingsFile);
-    const prevBackup = fs.existsSync(paths.backupFile) ? readSettingsObject(paths.backupFile) : {};
+    const { bytes: beforeBytes, data: settings } = readSettingsBytesAndObject(paths.settingsFile);
+    const { data: prevBackup } = readSettingsBytesAndObject(paths.backupFile, 'Install backup file');
     const current = settings.statusLine;
     const owned = ownsStatusLine(current, prevBackup);
 
@@ -204,7 +267,7 @@ export function installStatusLine({
       : {
           name: INSTALL_NAME,
           schema: INSTALL_SCHEMA_VERSION,
-          previousPresent: Object.prototype.hasOwnProperty.call(settings, 'statusLine'),
+          previousPresent: Object.hasOwn(settings, 'statusLine'),
           previous: current ?? null,
         };
 
@@ -216,7 +279,7 @@ export function installStatusLine({
     copyRuntimeFiles(sourceRoot, paths.runtimeDir);
 
     const checkBytes = fs.existsSync(paths.settingsFile) ? fs.readFileSync(paths.settingsFile) : null;
-    if ((beforeBytes === null) !== (checkBytes === null) || (beforeBytes && !beforeBytes.equals(checkBytes))) {
+    if ((beforeBytes === null) !== (checkBytes === null) || (beforeBytes && checkBytes && !beforeBytes.equals(checkBytes))) {
       throw new Error('settings.json changed concurrently during installation; please retry.');
     }
 
@@ -242,6 +305,10 @@ export function installStatusLine({
   };
 }
 
+/**
+ * Uninstalls the standalone `statusLine` runtime and restores the prior `settings.json` entry.
+ * @param {{ homeDir?: string }} [opts]
+ */
 export function uninstallStatusLine({ homeDir = os.homedir() } = {}) {
   const paths = getCliPaths(homeDir);
   if (!fs.existsSync(paths.runtimeDir) && !fs.existsSync(paths.backupFile)) {
@@ -254,13 +321,12 @@ export function uninstallStatusLine({ homeDir = os.homedir() } = {}) {
     assertNotSymlinkOrJunction(paths.backupFile);
     verifyRuntimeRoot(paths.runtimeDir);
 
-    const backup = readSettingsObject(paths.backupFile);
+    const { data: backup } = readSettingsBytesAndObject(paths.backupFile, 'Install backup file');
     if (backup.name !== INSTALL_NAME || backup.schema !== INSTALL_SCHEMA_VERSION) {
       throw new Error('Recovery metadata is missing or invalid; refusing to uninstall.');
     }
 
-    const beforeBytes = fs.existsSync(paths.settingsFile) ? fs.readFileSync(paths.settingsFile) : null;
-    const settings = readSettingsObject(paths.settingsFile);
+    const { bytes: beforeBytes, data: settings } = readSettingsBytesAndObject(paths.settingsFile);
     if (ownsStatusLine(settings.statusLine, backup)) {
       if (backup.previousPresent) {
         settings.statusLine = backup.previous;
@@ -268,7 +334,7 @@ export function uninstallStatusLine({ homeDir = os.homedir() } = {}) {
         delete settings.statusLine;
       }
       const checkBytes = fs.existsSync(paths.settingsFile) ? fs.readFileSync(paths.settingsFile) : null;
-      if ((beforeBytes === null) !== (checkBytes === null) || (beforeBytes && !beforeBytes.equals(checkBytes))) {
+      if ((beforeBytes === null) !== (checkBytes === null) || (beforeBytes && checkBytes && !beforeBytes.equals(checkBytes))) {
         throw new Error('settings.json changed concurrently during uninstall; please retry.');
       }
       writeJsonAtomic(paths.settingsFile, settings);
@@ -290,10 +356,14 @@ export function uninstallStatusLine({ homeDir = os.homedir() } = {}) {
   return { removed: true, restored };
 }
 
+/**
+ * Inspects current `statusLine` installation and configuration state without mutating disk.
+ * @param {{ homeDir?: string, dataDir?: string | null }} [opts]
+ */
 export function inspectStatusLine({ homeDir = os.homedir(), dataDir = null } = {}) {
   const paths = getCliPaths(homeDir);
-  const settings = fs.existsSync(paths.settingsFile) ? readSettingsObject(paths.settingsFile) : {};
-  const backup = fs.existsSync(paths.backupFile) ? readSettingsObject(paths.backupFile) : {};
+  const { data: settings } = readSettingsBytesAndObject(paths.settingsFile);
+  const { data: backup } = readSettingsBytesAndObject(paths.backupFile, 'Install backup file');
   const current = settings.statusLine;
   const configured = ownsStatusLine(current, backup);
   const installed = fs.existsSync(path.join(paths.runtimeDir, 'bin', 'statusline.mjs'));

@@ -1,5 +1,22 @@
+// @ts-check
 import path from 'node:path';
 import { readJsonSafe } from './store.mjs';
+
+/**
+ * @typedef {{ id: string, input: number, cacheRead: number, cacheWrite: number, output: number }} PricingRate
+ * @typedef {{
+ *   known: boolean,
+ *   tier: string | null,
+ *   estimatedUsd: number,
+ *   uncachedInputUsd: number,
+ *   cacheReadUsd: number,
+ *   cacheWriteUsd: number,
+ *   outputUsd: number,
+ *   cacheSavedUsd: number,
+ * }} TokenCostEstimate
+ */
+
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 /**
  * Reference API pricing in USD per 1,000,000 tokens.
@@ -7,7 +24,7 @@ import { readJsonSafe } from './store.mjs';
  * these rates provide transparent API-equivalent cost and cache-savings estimates.
  * Users can override or extend rules in `$DATA_DIR/pricing.json`.
  */
-export const DEFAULT_PRICING_RULES = [
+export const DEFAULT_PRICING_RULES = Object.freeze([
   // Gemini 4 / 3 / 2.5 flagship & reasoning tiers (Pro / Neon / Argon / Carbon / Ultra)
   {
     id: 'gemini-argon',
@@ -132,23 +149,45 @@ export const DEFAULT_PRICING_RULES = [
     cacheWrite: 2.0,
     output: 8.0,
   },
-];
+]);
 
+/**
+ * @param {string} dataDir
+ * @returns {string}
+ */
 export function pricingFilePath(dataDir) {
   return path.join(dataDir, 'pricing.json');
 }
 
+/**
+ * Loads and validates optional user pricing overrides from `<dataDir>/pricing.json`.
+ * Returns a prototype-free dictionary keyed by lowercase model pattern/id.
+ * @param {string} dataDir
+ * @returns {Record<string, PricingRate>}
+ */
 export function loadCustomPricing(dataDir) {
+  /** @type {Record<string, PricingRate>} */
+  const cleaned = Object.create(null);
+  if (!dataDir) return cleaned;
   const data = readJsonSafe(pricingFilePath(dataDir), null);
-  if (!data || typeof data !== 'object') return {};
-  const rates = data.models && typeof data.models === 'object' ? data.models : data;
-  const cleaned = {};
-  for (const [key, val] of Object.entries(rates)) {
-    if (!val || typeof val !== 'object') continue;
+  if (!data || typeof data !== 'object') return cleaned;
+
+  const rates =
+    data.models && typeof data.models === 'object' && !Array.isArray(data.models)
+      ? data.models
+      : data;
+
+  for (const [rawKey, val] of Object.entries(rates)) {
+    const trimmedKey = rawKey.trim();
+    const lowerKey = trimmedKey.toLowerCase();
+    if (!lowerKey || FORBIDDEN_KEYS.has(lowerKey)) continue;
+    if (!val || typeof val !== 'object' || Array.isArray(val)) continue;
+
     const input = Number(val.input);
     const output = Number(val.output);
     const cacheRead = val.cacheRead !== undefined ? Number(val.cacheRead) : input * 0.1;
     const cacheWrite = val.cacheWrite !== undefined ? Number(val.cacheWrite) : input;
+
     if (
       Number.isFinite(input) &&
       input >= 0 &&
@@ -159,20 +198,30 @@ export function loadCustomPricing(dataDir) {
       Number.isFinite(cacheWrite) &&
       cacheWrite >= 0
     ) {
-      cleaned[key.toLowerCase()] = { id: key, input, cacheRead, cacheWrite, output };
+      cleaned[lowerKey] = { id: trimmedKey, input, cacheRead, cacheWrite, output };
     }
   }
   return cleaned;
 }
 
+/**
+ * Resolves the pricing rule for `modelName`, checking user overrides (exact then substring)
+ * before built-in reference rules.
+ * @param {unknown} modelName
+ * @param {Record<string, PricingRate>} [customRates]
+ * @returns {PricingRate | null}
+ */
 export function resolveModelPricing(modelName, customRates = {}) {
   const normalized = String(modelName || '').trim().toLowerCase();
   if (!normalized) return null;
 
-  // Exact match in user overrides first, then substring match.
-  if (customRates[normalized]) return customRates[normalized];
-  for (const [key, rate] of Object.entries(customRates)) {
-    if (normalized.includes(key)) return rate;
+  if (customRates && typeof customRates === 'object') {
+    if (Object.hasOwn(customRates, normalized)) {
+      return customRates[normalized];
+    }
+    for (const [key, rate] of Object.entries(customRates)) {
+      if (key && normalized.includes(key)) return rate;
+    }
   }
 
   for (const rule of DEFAULT_PRICING_RULES) {
@@ -189,9 +238,25 @@ export function resolveModelPricing(modelName, customRates = {}) {
   return null;
 }
 
+/**
+ * Clamps arbitrary token counts to finite non-negative numbers.
+ * @param {unknown} value
+ * @returns {number}
+ */
+function safeCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * Estimates API-equivalent USD cost and prompt-cache savings for a request or bucket.
+ * @param {unknown} modelName
+ * @param {{ inputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number, outputTokens?: number }} [counts]
+ * @param {Record<string, PricingRate>} [customRates]
+ * @returns {TokenCostEstimate}
+ */
 export function estimateTokenCost(
   modelName,
-  { inputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0, outputTokens = 0 },
+  { inputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0, outputTokens = 0 } = {},
   customRates = {}
 ) {
   const rate = resolveModelPricing(modelName, customRates);
@@ -209,12 +274,17 @@ export function estimateTokenCost(
   }
 
   const perM = 1_000_000;
-  const uncachedInputUsd = (inputTokens / perM) * rate.input;
-  const cacheReadUsd = (cacheReadTokens / perM) * rate.cacheRead;
-  const cacheWriteUsd = (cacheWriteTokens / perM) * rate.cacheWrite;
-  const outputUsd = (outputTokens / perM) * rate.output;
+  const inTok = safeCount(inputTokens);
+  const readTok = safeCount(cacheReadTokens);
+  const writeTok = safeCount(cacheWriteTokens);
+  const outTok = safeCount(outputTokens);
+
+  const uncachedInputUsd = (inTok / perM) * rate.input;
+  const cacheReadUsd = (readTok / perM) * rate.cacheRead;
+  const cacheWriteUsd = (writeTok / perM) * rate.cacheWrite;
+  const outputUsd = (outTok / perM) * rate.output;
   const estimatedUsd = uncachedInputUsd + cacheReadUsd + cacheWriteUsd + outputUsd;
-  const cacheSavedUsd = Math.max(0, (cacheReadTokens / perM) * (rate.input - rate.cacheRead));
+  const cacheSavedUsd = Math.max(0, (readTok / perM) * (rate.input - rate.cacheRead));
 
   return {
     known: true,
