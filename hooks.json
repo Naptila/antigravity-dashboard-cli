@@ -1,0 +1,11 @@
+{
+  "dash-console-commands": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node ./src/hook-handler.mjs",
+        "timeout": 10
+      }
+    ]
+  }
+}

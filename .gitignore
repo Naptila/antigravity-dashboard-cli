@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build & coverage outputs
+dist/
+build/
+coverage/
+
+# Secrets & local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local token/usage caches & runtime state
+dashboard-cli-data/
+usage-v*.json
+preferences.json
+.cache/
+*.tmp
+*.lock
+
+# Logs, OS & scratch files
+*.log
+.DS_Store
+Thumbs.db
+tmp/
+

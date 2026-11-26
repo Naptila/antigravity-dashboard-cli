@@ -1,0 +1,29 @@
+{
+  "name": "antigravity-dashboard-cli",
+  "version": "0.2.0",
+  "description": "Lightweight usage & spend statistics plugin for Google Antigravity CLI (agy) — cumulative tokens, cached tokens, API-equivalent spend, cache savings, 12-week heatmap, and date/week/month/model breakdowns via /dash:stats.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "agy-dashboard": "./bin/cli.mjs",
+    "agy-dashboard-statusline": "./bin/statusline.mjs"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "stats": "node bin/cli.mjs stats",
+    "stats:zh": "node bin/cli.mjs stats --language zh-CN",
+    "preview": "node bin/cli.mjs preview"
+  },
+  "keywords": [
+    "antigravity",
+    "agy",
+    "cli",
+    "stats",
+    "usage",
+    "plugin",
+    "gemini"
+  ]
+}
