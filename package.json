@@ -1,6 +1,6 @@
 {
   "name": "antigravity-dashboard-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Lightweight usage & spend statistics plugin for Google Antigravity CLI (agy) — cumulative tokens, cached tokens, API-equivalent spend, cache savings, 12-week heatmap, and date/week/month/model breakdowns via /dash:stats.",
   "type": "module",
   "license": "MIT",

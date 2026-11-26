@@ -2,7 +2,7 @@
   "name": "dash",
   "display_name": "Antigravity CLI Stats",
   "description": "On-demand cumulative token usage, cached token totals, estimated spend, cache savings, 12-week heatmap, and date/week/month/model breakdowns via /dash:stats and /dash:lang.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "category": "Developer Tools",
   "logo": "assets/logo.svg"
 }
