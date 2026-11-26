@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify tag matches package.json and plugin.json
+        run: node scripts/release-bump.mjs --check --tag "${GITHUB_REF_NAME}"
+
+      - name: Run syntax checks, plugin validation, and tests
+        run: |
+          npm run check
+          node scripts/release-bump.mjs --validate-plugin
+          if command -v agy >/dev/null 2>&1; then
+            agy plugin validate .
+          fi
+          npm test
+
+      - name: Pack release tarball and generate SHA-256 checksum
+        id: pack
+        run: |
+          TARBALL="$(npm pack --silent | tail -n 1)"
+          test -f "${TARBALL}"
+          sha256sum "${TARBALL}" > "${TARBALL}.sha256"
+          sha256sum --check "${TARBALL}.sha256"
+          echo "tarball=${TARBALL}" >> "${GITHUB_OUTPUT}"
+          echo "checksum=${TARBALL}.sha256" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            ${{ steps.pack.outputs.tarball }}
+            ${{ steps.pack.outputs.checksum }}
