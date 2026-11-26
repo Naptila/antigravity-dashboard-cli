@@ -9,6 +9,7 @@ import { PLUGIN_VERSION } from '../src/constants.mjs';
 import {
   bumpVersion,
   checkVersions,
+  parseSemver,
   validatePluginStructure,
 } from '../scripts/release-bump.mjs';
 
@@ -16,19 +17,33 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
-test('version is locked at 0.1.0 across package.json, plugin.json, and src/constants.mjs', () => {
-  assert.equal(PLUGIN_VERSION, '0.1.0');
-  const verified = checkVersions(REPO_ROOT, { tag: 'v0.1.0' });
-  assert.equal(verified, '0.1.0');
+test('version is valid SemVer and synchronized across package.json, plugin.json, PLUGIN_VERSION, and cli.mjs --version', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+  const plugin = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'plugin.json'), 'utf8'));
+
+  assert.equal(parseSemver(pkg.version), pkg.version);
+  assert.equal(plugin.version, pkg.version);
+  assert.equal(PLUGIN_VERSION, pkg.version);
+
+  const verified = checkVersions(REPO_ROOT, { tag: `v${pkg.version}` });
+  assert.equal(verified, pkg.version);
 
   const info = validatePluginStructure(REPO_ROOT);
   assert.equal(info.pluginName, 'dash');
-  assert.equal(info.version, '0.1.0');
+  assert.equal(info.version, pkg.version);
+
+  const cliVersion = execFileSync(
+    process.execPath,
+    [path.join(REPO_ROOT, 'bin', 'cli.mjs'), '--version'],
+    { encoding: 'utf8' }
+  ).trim();
+  assert.equal(cliVersion, pkg.version);
 });
 
 test('package.json defines clean packaging allowlist excluding tests, scripts, .github, and AGENTS.md', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '0.1.0');
+  assert.equal(parseSemver(pkg.version), pkg.version);
+  assert.equal(pkg.version, PLUGIN_VERSION);
   assert.equal(pkg.engines?.node, '>=20.0.0');
   assert.ok(fs.existsSync(path.join(REPO_ROOT, pkg.bin['agy-dashboard'])));
   assert.ok(fs.existsSync(path.join(REPO_ROOT, pkg.bin['agy-dashboard-statusline'])));
